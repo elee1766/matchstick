@@ -1,0 +1,212 @@
+## Core types for matchstick's internal state.
+## These are populated by the Lua VM callbacks and consumed by the renderer.
+
+import std/[tables, options]
+
+type
+  Action* = enum
+    actAccept = "accept"
+    actDrop = "drop"
+    actReject = "reject"
+
+  DhcpRole* = enum
+    dhcpClient = "client"
+    dhcpServer = "server"
+
+  # ------------------------------------------------------------------
+  # Zones and hosts
+  # ------------------------------------------------------------------
+
+  Zone* = ref object
+    name*: string
+    interfaces*: seq[string]   ## empty for the "fw" zone
+    bridge*: bool
+    line*: int                 ## Lua source line where declared
+
+  Host* = ref object
+    name*: string
+    zone*: Zone
+    addr4*: string             ## IPv4 address (may be empty)
+    addr6*: string             ## IPv6 address (may be empty)
+    line*: int
+
+  ## An Endpoint is either a zone or a host (used as from/to in rules).
+  Endpoint* = object
+    zone*: Zone
+    host*: Option[Host]        ## If set, narrows to this host within the zone
+
+  # ------------------------------------------------------------------
+  # Services
+  # ------------------------------------------------------------------
+
+  ServiceEntry* = object
+    proto*: string             ## "tcp", "udp", "icmp", "icmpv6"
+    port*: string              ## port or range ("22", "80", "6881-6999", "echo-request")
+
+  Service* = ref object
+    name*: string
+    entries*: seq[ServiceEntry]
+    line*: int
+
+  # ------------------------------------------------------------------
+  # Rate limits
+  # ------------------------------------------------------------------
+
+  RateLimit* = ref object
+    rate*: string              ## e.g. "5/minute"
+    burst*: int                ## burst count (0 = no burst)
+    name*: string              ## named rate for shared sets (empty = anonymous)
+
+  # ------------------------------------------------------------------
+  # Rules
+  # ------------------------------------------------------------------
+
+  Rule* = ref object
+    src*: Endpoint
+    dst*: Endpoint
+    action*: Action
+    service*: Option[Service]  ## resolved service handle
+    proto*: seq[string]        ## raw protocol(s) if no service
+    port*: seq[string]         ## raw port(s) if no service
+    saddrList*: string         ## iplist reference (empty = none)
+    rate*: Option[RateLimit]
+    log*: string               ## log prefix (empty = no log)
+    line*: int
+
+  # ------------------------------------------------------------------
+  # Policies
+  # ------------------------------------------------------------------
+
+  Policy* = ref object
+    src*: Endpoint
+    dst*: Endpoint
+    action*: Action
+    log*: bool
+    line*: int
+
+  # ------------------------------------------------------------------
+  # NAT
+  # ------------------------------------------------------------------
+
+  DnatRule* = ref object
+    iface*: Zone               ## incoming interface zone
+    daddr*: string             ## original destination match (empty = any)
+    service*: Option[Service]
+    proto*: seq[string]
+    port*: seq[string]
+    dest*: string              ## destination IP or host addr
+    destPort*: int             ## port remap (0 = same port)
+    line*: int
+
+  SnatRule* = ref object
+    fromNet*: string           ## source subnet
+    daddr*: string             ## destination match (empty = any)
+    oif*: string               ## outgoing interface name
+    masquerade*: bool
+    addr4*: string             ## static SNAT address (empty if masquerade)
+    proto*: string             ## optional protocol filter
+    port*: seq[string]         ## optional port filter
+    line*: int
+
+  # ------------------------------------------------------------------
+  # IP lists
+  # ------------------------------------------------------------------
+
+  IpList* = ref object
+    name*: string
+    ipType*: string            ## "ipv4" or "ipv6"
+    flags*: string             ## "timeout", "interval", etc.
+    elements*: seq[string]     ## static elements (may be empty for dynamic)
+    line*: int
+
+  # ------------------------------------------------------------------
+  # DHCP
+  # ------------------------------------------------------------------
+
+  DhcpConfig* = ref object
+    zone*: Zone
+    role*: DhcpRole
+    line*: int
+
+  # ------------------------------------------------------------------
+  # Docker
+  # ------------------------------------------------------------------
+
+  DockerConfig* = ref object
+    backend*: string
+    bridges*: seq[string]
+
+  # ------------------------------------------------------------------
+  # Global config
+  # ------------------------------------------------------------------
+
+  GlobalConfig* = object
+    tableName*: string
+    priorityOffset*: int
+    logRate*: string
+    logPrefix*: string
+    logLevel*: string
+
+  # ------------------------------------------------------------------
+  # Laundry (packet hygiene)
+  # ------------------------------------------------------------------
+
+  LaundryConfig* = object
+    rpfilter*: bool
+    bogonDrop*: bool
+    tcpStrict*: bool
+    broadcastDrop*: bool
+
+  # ------------------------------------------------------------------
+  # Top-level firewall state
+  # ------------------------------------------------------------------
+
+  FirewallState* = ref object
+    config*: GlobalConfig
+    laundry*: LaundryConfig
+    zones*: OrderedTable[string, Zone]
+    hosts*: OrderedTable[string, Host]
+    services*: OrderedTable[string, Service]
+    policies*: seq[Policy]
+    rules*: seq[Rule]
+    dnatRules*: seq[DnatRule]
+    snatRules*: seq[SnatRule]
+    ipLists*: OrderedTable[string, IpList]
+    dhcp*: seq[DhcpConfig]
+    docker*: Option[DockerConfig]
+    ## Unified name registry -- all zone and host names.
+    ## Used to detect collisions.
+    names*: OrderedTable[string, string]  ## name -> "zone" or "host"
+    includedFiles*: seq[string]
+    warnings*: seq[string]
+
+proc newFirewallState*(): FirewallState =
+  result = FirewallState(
+    config: GlobalConfig(
+      tableName: "matchstick",
+      priorityOffset: 5,
+      logRate: "5/minute burst 5",
+      logPrefix: "matchstick",
+      logLevel: "info",
+    ),
+    laundry: LaundryConfig(
+      rpfilter: true,
+      bogonDrop: true,
+      tcpStrict: true,
+      broadcastDrop: true,
+    ),
+    zones: initOrderedTable[string, Zone](),
+    hosts: initOrderedTable[string, Host](),
+    services: initOrderedTable[string, Service](),
+    ipLists: initOrderedTable[string, IpList](),
+    names: initOrderedTable[string, string](),
+  )
+
+proc registerName*(state: FirewallState, name: string, kind: string, line: int) =
+  ## Register a name in the unified namespace. Raises if already taken.
+  if name in state.names:
+    let existingKind = state.names[name]
+    raise newException(CatchableError,
+      "name \"" & name & "\" is already registered as a " & existingKind &
+      ", cannot reuse as a " & kind & " (line " & $line & ")")
+  state.names[name] = kind
