@@ -481,9 +481,9 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
 
   var rule = Rule(src: src, dst: dst, action: action, line: line)
 
-  # arg 5: service handle, service string, or table with options
+  # arg 5: service handle, service string, table with options, or absent (match all)
   if lua_isnoneornil(L, 5):
-    discard luaL_error(L, "fw:rule: missing service or options argument")
+    discard  # No service/port filter = match all traffic (bare rule)
 
   elif lua_type(L, 5) == LUA_TSTRING:
     # String service name
