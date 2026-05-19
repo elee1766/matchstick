@@ -69,6 +69,7 @@ type
     proto*: seq[string]        ## raw protocol(s) if no service
     port*: seq[string]         ## raw port(s) if no service
     saddrList*: string         ## iplist reference (empty = none)
+    daddrRaw*: string          ## raw destination IP (for forward rules to specific IPs)
     rate*: Option[RateLimit]
     log*: string               ## log prefix (empty = no log)
     line*: int
@@ -146,6 +147,12 @@ type
     logRate*: string
     logPrefix*: string
     logLevel*: string
+    family*: string            ## "inet" (dual-stack) or "ip" (IPv4 only)
+    logSetSize*: int           ## max entries in log rate limiter sets
+    logSetTimeout*: int        ## seconds before rate limit entry expires
+    counter*: bool             ## add counters to all rules
+    inputPolicy*: string       ## default input chain policy ("drop" or "reject")
+    outputPolicy*: string      ## default output chain policy ("accept" or "drop")
 
   # ------------------------------------------------------------------
   # Laundry (packet hygiene)
@@ -188,6 +195,12 @@ proc newFirewallState*(): FirewallState =
       logRate: "5/minute burst 5",
       logPrefix: "matchstick",
       logLevel: "info",
+      family: "inet",
+      logSetSize: 65535,
+      logSetTimeout: 60,
+      counter: false,
+      inputPolicy: "drop",
+      outputPolicy: "accept",
     ),
     laundry: LaundryConfig(
       rpfilter: true,

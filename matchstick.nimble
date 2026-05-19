@@ -8,3 +8,16 @@ bin           = @["matchstick"]
 
 # Dependencies
 requires "nim >= 2.2.0"
+requires "jsony >= 1.1.5"
+
+# Tasks
+task test, "Run all tests":
+  echo "=== Unit tests ==="
+  for f in listFiles("tests"):
+    if f.endsWith(".nim"):
+      exec "nim c -r --hints:off --warnings:off " & f
+  echo ""
+  echo "=== Integration tests ==="
+  for f in listFiles("tests/integration"):
+    if f.endsWith(".nim"):
+      exec "nim c -r --hints:off --warnings:off " & f

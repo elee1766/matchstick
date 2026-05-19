@@ -1,261 +1,343 @@
-## emit_json.nim - Serialize NftRuleset to nftables JSON format.
+## emit_json.nim - nftables JSON serialization via jsony.
 ##
-## Produces JSON matching the libnftables-json(5) schema, suitable for
-## loading via `nft -j -f` or the libnftables C API with NFT_CTX_INPUT_JSON.
-##
-## The output format wraps each object in {"add": ...} commands:
-##   {"nftables": [{"add": {"table": ...}}, {"add": {"chain": ...}}, ...]}
+## Expr and Stmt have custom dumpHooks (key-based variant dispatch).
+## Top-level records (NftTable, NftChain, etc.) also need hooks because
+## jsony's default uses the discriminator field for variants.
+## NftCmd and NftRuleset use hooks to produce the nftables command format.
 
-import std/[json, sequtils, strutils]
+import std/[strutils, options, json]
+import jsony
 import ./nft_ir
 
 # ---------------------------------------------------------------------------
-# Expression to JSON
+# Expr dumpHook
 # ---------------------------------------------------------------------------
 
-proc exprToJson(e: Expr): JsonNode =
+proc dumpHook*(s: var string, e: Expr) =
+  if e == nil:
+    s.add "null"
+    return
   case e.kind
   of ekString:
-    return newJString(e.strVal)
-  of ekInt:
-    return newJInt(e.intVal)
-  of ekBool:
-    return newJBool(e.boolVal)
+    if '/' in e.strVal and ('.' in e.strVal or ':' in e.strVal):
+      let parts = e.strVal.split('/')
+      if parts.len == 2:
+        try:
+          let plen = parseInt(parts[1])
+          s.add "{\"prefix\":{\"addr\":"
+          s.dumpHook(parts[0])
+          s.add ",\"len\":" & $plen & "}}"
+          return
+        except ValueError: discard
+    s.dumpHook(e.strVal)
+  of ekInt:       s.dumpHook(e.intVal)
+  of ekBool:      s.dumpHook(e.boolVal)
   of ekList:
-    var arr = newJArray()
-    for elem in e.listElems:
-      arr.add exprToJson(elem)
-    return arr
+    s.add "["
+    for i, el in e.listElems:
+      if i > 0: s.add ","
+      s.dumpHook(el)
+    s.add "]"
   of ekPrefix:
-    return %*{"prefix": {"addr": e.prefixAddr, "len": e.prefixLen}}
+    s.add "{\"prefix\":{\"addr\":"
+    s.dumpHook(e.prefixAddr)
+    s.add ",\"len\":" & $e.prefixLen & "}}"
   of ekRange:
-    return %*{"range": [exprToJson(e.rangeMin), exprToJson(e.rangeMax)]}
+    s.add "{\"range\":["
+    s.dumpHook(e.rangeMin)
+    s.add ","
+    s.dumpHook(e.rangeMax)
+    s.add "]}"
   of ekConcat:
-    return %*{"concat": e.concatExprs.mapIt(exprToJson(it))}
+    s.add "{\"concat\":["
+    for i, el in e.concatExprs:
+      if i > 0: s.add ","
+      s.dumpHook(el)
+    s.add "]}"
   of ekPayload:
-    return %*{"payload": {"protocol": e.payloadProto, "field": e.payloadField}}
+    s.add "{\"payload\":{\"protocol\":"
+    s.dumpHook(e.payloadProto)
+    s.add ",\"field\":"
+    s.dumpHook(e.payloadField)
+    s.add "}}"
   of ekMeta:
-    return %*{"meta": {"key": e.metaKey}}
+    s.add "{\"meta\":{\"key\":"
+    s.dumpHook(e.metaKey)
+    s.add "}}"
   of ekCt:
-    var obj = %*{"ct": {"key": e.ctKey}}
-    if e.ctDir != "":
-      obj["ct"]["dir"] = newJString(e.ctDir)
-    if e.ctFamily != "":
-      obj["ct"]["family"] = newJString(e.ctFamily)
-    return obj
+    s.add "{\"ct\":{\"key\":"
+    s.dumpHook(e.ctKey)
+    if e.ctDir != "": s.add ",\"dir\":"; s.dumpHook(e.ctDir)
+    if e.ctFamily != "": s.add ",\"family\":"; s.dumpHook(e.ctFamily)
+    s.add "}}"
   of ekFib:
-    return %*{"fib": {"result": e.fibResult, "flags": e.fibFlags.mapIt(%it)}}
-  of ekSet:
-    return newJString("@" & e.setName)
+    s.add "{\"fib\":{\"result\":"
+    s.dumpHook(e.fibResult)
+    s.add ",\"flags\":["
+    for i, f in e.fibFlags:
+      if i > 0: s.add ","
+      s.dumpHook(f)
+    s.add "]}}"
+  of ekSet:     s.dumpHook("@" & e.setName)
   of ekMap:
-    return %*{"map": {"key": exprToJson(e.mapKey), "data": "@" & e.mapData}}
+    s.add "{\"map\":{\"key\":"
+    s.dumpHook(e.mapKey)
+    s.add ",\"data\":"
+    s.dumpHook("@" & e.mapData)
+    s.add "}}"
   of ekElem:
     if e.elemTimeout > 0:
-      return %*{"elem": {"val": exprToJson(e.elemVal), "timeout": e.elemTimeout}}
-    return exprToJson(e.elemVal)
+      s.add "{\"elem\":{\"val\":"
+      s.dumpHook(e.elemVal)
+      s.add ",\"timeout\":" & $e.elemTimeout & "}}"
+    else:
+      s.dumpHook(e.elemVal)
+  of ekVerdict:
+    case e.verdictKind
+    of "accept": s.add "{\"accept\":null}"
+    of "drop":   s.add "{\"drop\":null}"
+    of "return": s.add "{\"return\":null}"
+    of "jump":
+      s.add "{\"jump\":{\"target\":"
+      s.dumpHook(e.verdictTarget)
+      s.add "}}"
+    of "goto":
+      s.add "{\"goto\":{\"target\":"
+      s.dumpHook(e.verdictTarget)
+      s.add "}}"
+    else: s.add "{"; s.dumpHook(e.verdictKind); s.add ":null}"
+  of ekBinOp:
+    s.add "{"
+    s.dumpHook(e.binOp)
+    s.add ":["
+    s.dumpHook(e.binLeft)
+    s.add ","
+    s.dumpHook(e.binRight)
+    s.add "]}"
+  of ekAnonymousSet:
+    s.add "{\"set\":["
+    for i, el in e.anonSetElems:
+      if i > 0: s.add ","
+      s.dumpHook(el)
+    s.add "]}"
 
 # ---------------------------------------------------------------------------
-# Statement to JSON
+# Stmt dumpHook
 # ---------------------------------------------------------------------------
 
-proc stmtToJson(s: Stmt): JsonNode =
-  case s.kind
+proc dumpHook*(s: var string, st: Stmt) =
+  if st == nil:
+    s.add "null"
+    return
+  case st.kind
   of skMatch:
-    return %*{"match": {
-      "op": $s.matchOp,
-      "left": exprToJson(s.matchLeft),
-      "right": exprToJson(s.matchRight),
-    }}
-  of skAccept:
-    return %*{"accept": newJNull()}
-  of skDrop:
-    return %*{"drop": newJNull()}
-  of skReturn:
-    return %*{"return": newJNull()}
+    s.add "{\"match\":{\"op\":"
+    s.dumpHook($st.matchOp)
+    s.add ",\"left\":"
+    s.dumpHook(st.matchLeft)
+    s.add ",\"right\":"
+    s.dumpHook(st.matchRight)
+    s.add "}}"
+  of skAccept: s.add "{\"accept\":null}"
+  of skDrop:   s.add "{\"drop\":null}"
+  of skReturn: s.add "{\"return\":null}"
   of skReject:
-    var obj = %*{"reject": newJObject()}
-    if s.rejectType != "":
-      obj["reject"]["type"] = newJString(s.rejectType)
-    if s.rejectExpr != "":
-      obj["reject"]["expr"] = newJString(s.rejectExpr)
-    return obj
+    s.add "{\"reject\":{"
+    var first = true
+    if st.rejectType != "":
+      s.add "\"type\":"; s.dumpHook(st.rejectType); first = false
+    if st.rejectExpr != "":
+      if not first: s.add ","
+      s.add "\"expr\":"; s.dumpHook(st.rejectExpr)
+    s.add "}}"
   of skJump:
-    return %*{"jump": {"target": s.jumpTarget}}
+    s.add "{\"jump\":{\"target\":"; s.dumpHook(st.jumpTarget); s.add "}}"
   of skGoto:
-    return %*{"goto": {"target": s.gotoTarget}}
+    s.add "{\"goto\":{\"target\":"; s.dumpHook(st.gotoTarget); s.add "}}"
   of skCounter:
-    if s.counterName != "":
-      return %*{"counter": s.counterName}
-    return %*{"counter": {"packets": 0, "bytes": 0}}
+    if st.counterName != "":
+      s.add "{\"counter\":"; s.dumpHook(st.counterName); s.add "}"
+    else:
+      s.add "{\"counter\":{\"packets\":0,\"bytes\":0}}"
   of skLog:
-    var obj = newJObject()
-    if s.logPrefix != "":
-      obj["prefix"] = newJString(s.logPrefix)
-    if s.logLevel != "":
-      obj["level"] = newJString(s.logLevel)
-    if s.logFlags.len > 0:
-      obj["flags"] = %s.logFlags
-    return %*{"log": obj}
+    s.add "{\"log\":{"
+    var first = true
+    if st.logPrefix != "":
+      s.add "\"prefix\":"; s.dumpHook(st.logPrefix); first = false
+    if st.logLevel != "":
+      if not first: s.add ","
+      s.add "\"level\":"; s.dumpHook(st.logLevel); first = false
+    if st.logFlags.len > 0:
+      if not first: s.add ","
+      s.add "\"flags\":[";
+      for i, f in st.logFlags: (if i > 0: s.add ","); s.dumpHook(f)
+      s.add "]"
+    s.add "}}"
   of skLimit:
-    var obj = %*{"limit": {
-      "rate": s.limitRate,
-      "per": s.limitPer,
-    }}
-    if s.limitBurst > 0:
-      obj["limit"]["burst"] = newJInt(s.limitBurst)
-    if s.limitInv:
-      obj["limit"]["inv"] = newJBool(true)
-    return obj
+    s.add "{\"limit\":{\"rate\":" & $st.limitRate & ",\"per\":"
+    s.dumpHook(st.limitPer)
+    if st.limitBurst > 0: s.add ",\"burst\":" & $st.limitBurst
+    if st.limitInv: s.add ",\"inv\":true"
+    s.add "}}"
   of skDnat:
-    var obj = %*{"dnat": {"addr": s.dnatAddr, "family": s.dnatFamily}}
-    if s.dnatPort > 0:
-      obj["dnat"]["port"] = newJInt(s.dnatPort)
-    return obj
+    s.add "{\"dnat\":{\"addr\":"; s.dumpHook(st.dnatAddr)
+    s.add ",\"family\":"; s.dumpHook(st.dnatFamily)
+    if st.dnatPort > 0: s.add ",\"port\":" & $st.dnatPort
+    s.add "}}"
   of skSnat:
-    var obj = %*{"snat": {"addr": s.snatAddr, "family": s.snatFamily}}
-    if s.snatPort > 0:
-      obj["snat"]["port"] = newJInt(s.snatPort)
-    return obj
+    s.add "{\"snat\":{\"addr\":"; s.dumpHook(st.snatAddr)
+    s.add ",\"family\":"; s.dumpHook(st.snatFamily)
+    if st.snatPort > 0: s.add ",\"port\":" & $st.snatPort
+    s.add "}}"
   of skMasquerade:
-    if s.masqPort > 0:
-      return %*{"masquerade": {"port": s.masqPort}}
-    return %*{"masquerade": newJNull()}
+    if st.masqPort > 0: s.add "{\"masquerade\":{\"port\":" & $st.masqPort & "}}"
+    else: s.add "{\"masquerade\":null}"
   of skVmap:
-    return %*{"vmap": {
-      "key": exprToJson(s.vmapKey),
-      "data": exprToJson(s.vmapData),
-    }}
+    s.add "{\"vmap\":{\"key\":"; s.dumpHook(st.vmapKey)
+    s.add ",\"data\":"; s.dumpHook(st.vmapData)
+    s.add "}}"
   of skMangle:
-    return %*{"mangle": {
-      "key": exprToJson(s.mangleKey),
-      "value": exprToJson(s.mangleValue),
-    }}
+    s.add "{\"mangle\":{\"key\":"; s.dumpHook(st.mangleKey)
+    s.add ",\"value\":"; s.dumpHook(st.mangleValue)
+    s.add "}}"
   of skUpdate:
-    # nftables JSON doesn't have a direct "update" statement --
-    # it uses set element addition with an expression. For now, emit
-    # as a custom extension that documents the intent.
-    var stmts = newJArray()
-    for sub in s.updateStmts:
-      stmts.add stmtToJson(sub)
-    return %*{"update": {
-      "set": s.updateSet,
-      "key": exprToJson(s.updateKey),
-      "stmts": stmts,
-    }}
+    s.add "{\"set\":{\"op\":\"update\",\"elem\":"
+    s.dumpHook(st.updateKey)
+    s.add ",\"set\":"; s.dumpHook("@" & st.updateSet)
+    s.add ",\"stmt\":[";
+    for i, sub in st.updateStmts: (if i > 0: s.add ","); s.dumpHook(sub)
+    s.add "]}}"
 
 # ---------------------------------------------------------------------------
-# Top-level object to JSON
+# NftMapElem dumpHook -- [key, value] pair
 # ---------------------------------------------------------------------------
 
-proc objectToJson(obj: NftObject): JsonNode =
-  case obj.kind
-  of nokTable:
-    return %*{"table": {
-      "family": obj.tableFamily,
-      "name": obj.tableName,
-    }}
-  of nokChain:
-    var chain = %*{
-      "family": obj.chainFamily,
-      "table": obj.chainTable,
-      "name": obj.chainName,
-    }
-    if obj.chainIsBase:
-      chain["type"] = newJString($obj.chainType)
-      chain["hook"] = newJString($obj.chainHook)
-      chain["prio"] = newJInt(obj.chainPrio)
-      chain["policy"] = newJString($obj.chainPolicy)
-    return %*{"chain": chain}
-  of nokRule:
-    var rule = %*{
-      "family": obj.ruleFamily,
-      "table": obj.ruleTable,
-      "chain": obj.ruleChain,
-      "expr": obj.ruleExprs.mapIt(stmtToJson(it)),
-    }
-    if obj.ruleComment != "":
-      rule["comment"] = newJString(obj.ruleComment)
-    return %*{"rule": rule}
-  of nokSet:
-    var s = %*{
-      "family": obj.setFamily,
-      "table": obj.setTable,
-      "name": obj.setName,
-      "type": obj.setType,
-    }
-    if obj.setFlags.len > 0:
-      s["flags"] = %obj.setFlags
-    if obj.setSize > 0:
-      s["size"] = newJInt(obj.setSize)
-    if obj.setTimeout > 0:
-      s["timeout"] = newJInt(obj.setTimeout)
-    if obj.setElems.len > 0:
-      var elems = newJArray()
-      for e in obj.setElems:
-        elems.add exprToJson(e)
-      s["elem"] = elems
-    return %*{"set": s}
-  of nokMap:
-    var m = %*{
-      "family": obj.mapFamily,
-      "table": obj.mapTable,
-      "name": obj.mapName,
-    }
-    # Concat types like "ifname . ifname" become arrays in JSON
-    if " . " in obj.mapKeyType:
-      m["type"] = %obj.mapKeyType.split(" . ")
-    else:
-      m["type"] = newJString(obj.mapKeyType)
-    m["map"] = newJString(obj.mapValueType)
-    if obj.mapFlags.len > 0:
-      m["flags"] = %obj.mapFlags
-    if obj.mapElems.len > 0:
-      var elems = newJArray()
-      for elem in obj.mapElems:
-        elems.add %*[exprToJson(elem.key), exprToJson(elem.value)]
-      m["elem"] = elems
-    return %*{"map": m}
-  of nokFlush:
-    case obj.flushWhat
-    of "ruleset":
-      return %*{"flush": {"ruleset": newJNull()}}
-    else:
-      return %*{"flush": {obj.flushWhat: {
-        "family": obj.flushFamily,
-        "name": obj.flushName,
-      }}}
-  of nokDelete:
-    return %*{"delete": {obj.deleteWhat: {
-      "family": obj.deleteFamily,
-      "name": obj.deleteName,
-    }}}
-  of nokComment:
-    return %*{"comment": obj.commentText}
+proc dumpHook*(s: var string, e: NftMapElem) =
+  s.add "["
+  s.dumpHook(e.key)
+  s.add ","
+  s.dumpHook(e.value)
+  s.add "]"
 
 # ---------------------------------------------------------------------------
-# Top-level: emit the full ruleset as JSON
+# Top-level object dumpHooks -- needed because of field renames
+# (setType→type, chainType→type, keyType→type, mapType→map)
+# ---------------------------------------------------------------------------
+
+proc dumpHook*(s: var string, t: NftTable) =
+  s.add "{\"family\":"; s.dumpHook(t.family)
+  s.add ",\"name\":"; s.dumpHook(t.name)
+  s.add "}"
+
+proc dumpHook*(s: var string, c: NftChain) =
+  s.add "{\"family\":"; s.dumpHook(c.family)
+  s.add ",\"table\":"; s.dumpHook(c.table)
+  s.add ",\"name\":"; s.dumpHook(c.name)
+  if c.chainType.isSome:
+    s.add ",\"type\":"; s.dumpHook(c.chainType.get)
+  if c.hook.isSome:
+    s.add ",\"hook\":"; s.dumpHook(c.hook.get)
+  if c.prio.isSome:
+    s.add ",\"prio\":" & $c.prio.get
+  if c.policy.isSome:
+    s.add ",\"policy\":"; s.dumpHook(c.policy.get)
+  s.add "}"
+
+proc dumpHook*(s: var string, r: NftRule) =
+  s.add "{\"family\":"; s.dumpHook(r.family)
+  s.add ",\"table\":"; s.dumpHook(r.table)
+  s.add ",\"chain\":"; s.dumpHook(r.chain)
+  s.add ",\"expr\":["
+  for i, e in r.expr:
+    if i > 0: s.add ","
+    s.dumpHook(e)
+  s.add "]"
+  if r.comment.isSome:
+    s.add ",\"comment\":"; s.dumpHook(r.comment.get)
+  s.add "}"
+
+proc dumpHook*(s: var string, st: NftSet) =
+  s.add "{\"family\":"; s.dumpHook(st.family)
+  s.add ",\"table\":"; s.dumpHook(st.table)
+  s.add ",\"name\":"; s.dumpHook(st.name)
+  s.add ",\"type\":"; s.dumpHook(st.setType)
+  if st.flags.isSome:
+    s.add ",\"flags\":[";
+    for i, f in st.flags.get: (if i > 0: s.add ","); s.dumpHook(f)
+    s.add "]"
+  if st.size.isSome: s.add ",\"size\":" & $st.size.get
+  if st.timeout.isSome: s.add ",\"timeout\":" & $st.timeout.get
+  if st.elem.isSome:
+    s.add ",\"elem\":[";
+    for i, e in st.elem.get: (if i > 0: s.add ","); s.dumpHook(e)
+    s.add "]"
+  s.add "}"
+
+proc dumpHook*(s: var string, m: NftMap) =
+  s.add "{\"family\":"; s.dumpHook(m.family)
+  s.add ",\"table\":"; s.dumpHook(m.table)
+  s.add ",\"name\":"; s.dumpHook(m.name)
+  # Concat types → JSON array
+  if " . " in m.keyType:
+    s.add ",\"type\":["
+    let parts = m.keyType.split(" . ")
+    for i, p in parts: (if i > 0: s.add ","); s.dumpHook(p)
+    s.add "]"
+  else:
+    s.add ",\"type\":"; s.dumpHook(m.keyType)
+  s.add ",\"map\":"; s.dumpHook(m.mapType)
+  if m.flags.isSome:
+    s.add ",\"flags\":[";
+    for i, f in m.flags.get: (if i > 0: s.add ","); s.dumpHook(f)
+    s.add "]"
+  if m.elem.isSome:
+    s.add ",\"elem\":[";
+    for i, e in m.elem.get: (if i > 0: s.add ","); s.dumpHook(e)
+    s.add "]"
+  s.add "}"
+
+# ---------------------------------------------------------------------------
+# NftCmd dumpHook -- produces {"add": {"table": ...}} etc.
+# ---------------------------------------------------------------------------
+
+proc dumpHook*(s: var string, cmd: NftCmd) =
+  case cmd.kind
+  of nckMetainfo:
+    s.add "{\"metainfo\":{\"json_schema_version\":" & $cmd.metainfo.json_schema_version & "}}"
+  of nckAdd:
+    s.add "{\"add\":{"
+    case cmd.add.kind
+    of nakTable: s.add "\"table\":"; s.dumpHook(cmd.add.table)
+    of nakChain: s.add "\"chain\":"; s.dumpHook(cmd.add.chain)
+    of nakRule:  s.add "\"rule\":"; s.dumpHook(cmd.add.rule)
+    of nakSet:   s.add "\"set\":"; s.dumpHook(cmd.add.set)
+    of nakMap:   s.add "\"map\":"; s.dumpHook(cmd.add.map)
+    s.add "}}"
+  of nckDelete:
+    s.add "{\"delete\":{"; s.dumpHook(cmd.deleteWhat)
+    s.add ":{\"family\":"; s.dumpHook(cmd.delete.family)
+    s.add ",\"name\":"; s.dumpHook(cmd.delete.name)
+    s.add "}}}"
+
+# ---------------------------------------------------------------------------
+# NftRuleset dumpHook -- {"nftables": [...]}
+# ---------------------------------------------------------------------------
+
+proc dumpHook*(s: var string, rs: NftRuleset) =
+  s.add "{\"nftables\":["
+  for i, cmd in rs.nftables:
+    if i > 0: s.add ","
+    s.dumpHook(cmd)
+  s.add "]}"
+
+# ---------------------------------------------------------------------------
+# Public API
 # ---------------------------------------------------------------------------
 
 proc emitJson*(rs: NftRuleset, pretty: bool = true): string =
-  ## Emit the ruleset as nftables JSON format.
-  ## Each object is wrapped in {"add": ...} for loading via `nft -j -f`.
-  var arr = newJArray()
-
-  # Metainfo
-  arr.add %*{"metainfo": {"json_schema_version": 1}}
-
-  for obj in rs.objects:
-    case obj.kind
-    of nokDelete:
-      arr.add %*{"delete": objectToJson(obj)[obj.deleteWhat]}
-    of nokComment:
-      # JSON doesn't have comments -- skip or use a custom field
-      continue
-    else:
-      arr.add %*{"add": objectToJson(obj)}
-
-  let root = %*{"nftables": arr}
+  let compact = rs.toJson()
   if pretty:
-    return root.pretty() & "\n"
+    # Re-parse and pretty-print (small cost for config-size output)
+    return parseJson(compact).pretty() & "\n"
   else:
-    return $root & "\n"
+    return compact & "\n"

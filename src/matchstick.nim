@@ -1,9 +1,9 @@
 ## matchstick - Lua-based nftables firewall configuration tool
 
 import std/[os, strformat, options, tables, strutils]
-import ./lua_ffi
+import ./lua/ffi
 import ./types
-import ./lua_vm
+import ./lua/api
 import ./build
 import ./emit_text
 import ./emit_json
@@ -11,21 +11,37 @@ import ./validate
 import ./show
 import ./nftables_ffi
 
+const
+  defaultConfigPaths = [
+    "/etc/matchstick/firewall.lua",
+  ]
+
+proc findConfig(): string =
+  ## Find the config file from default paths.
+  for path in defaultConfigPaths:
+    if fileExists(path):
+      return path
+  return ""
+
 proc usage() =
   echo "matchstick - Lua-based nftables firewall configuration tool"
   echo ""
   echo "Usage:"
-  echo "  matchstick check  <config.lua>                    Validate config"
-  echo "  matchstick render <config.lua>                    Print nftables text"
-  echo "  matchstick render --json <config.lua>             Print nftables JSON"
-  echo "  matchstick apply  <config.lua>                    Apply to kernel"
-  echo "  matchstick diff   <config.lua>                    Diff running vs generated"
+  echo "  matchstick check  [config.lua]                    Validate config"
+  echo "  matchstick render [config.lua]                    Print nftables text"
+  echo "  matchstick render --json [config.lua]             Print nftables JSON"
+  echo "  matchstick apply  [config.lua]                    Apply to kernel"
+  echo "  matchstick diff   [config.lua]                    Diff running vs generated"
   echo ""
-  echo "  matchstick show matrix   <config.lua>             Zone policy matrix"
-  echo "  matchstick show rules    <config.lua> <src> <dst> Rules for zone pair"
-  echo "  matchstick show topology <config.lua>             Topology diagram"
+  echo "  matchstick show matrix   [config.lua]             Zone policy matrix"
+  echo "  matchstick show rules    [config.lua] <src> <dst> Rules for zone pair"
+  echo "  matchstick show topology [config.lua]             Topology diagram"
   echo "    --format=dot|d2|mermaid|ascii                     (default: ascii)"
-  echo "  matchstick show json     <config.lua>             State as JSON"
+  echo "  matchstick show json     [config.lua]             State as JSON"
+  echo ""
+  echo "If no config file is specified, searches:"
+  for p in defaultConfigPaths:
+    echo "  " & p
   quit(1)
 
 proc loadConfig(configFile: string): FirewallState =
@@ -148,8 +164,14 @@ proc main() =
       if configFile == "":
         configFile = args[i]
 
+  # If no config file specified, search defaults
   if configFile == "":
-    usage()
+    configFile = findConfig()
+    if configFile == "":
+      stderr.writeLine "error: no config file specified and none found at default paths"
+      for p in defaultConfigPaths:
+        stderr.writeLine "  looked in: " & p
+      quit(1)
 
   if not fileExists(configFile):
     stderr.writeLine "error: file not found: " & configFile

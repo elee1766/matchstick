@@ -1,341 +1,248 @@
-## emit_text.nim - Serialize NftRuleset to nftables text format.
-##
-## Each NftObject kind has an `emit` proc. The top-level `emitText` walks
-## the flat object list and groups them by table for proper nesting.
+## emit_text.nim - nftables text format emission from IR.
 
-import std/[strutils, tables, sequtils]
+import std/[strutils, tables, sequtils, options]
 import ./nft_ir
 import ./writer
 
 # ---------------------------------------------------------------------------
-# Expression emission
+# Expr → text
 # ---------------------------------------------------------------------------
 
-proc emitExpr(w: var Writer, e: Expr)  # forward decl
-
-proc emitExprInline(e: Expr): string =
-  ## Emit an expression as an inline string (no Writer state needed).
+proc toText*(e: Expr): string =
+  if e == nil: return "null"
   case e.kind
-  of ekString: return "\"" & e.strVal & "\""
-  of ekInt: return $e.intVal
-  of ekBool: return if e.boolVal: "1" else: "0"
-  of ekPrefix: return e.prefixAddr & "/" & $e.prefixLen
-  of ekRange: return emitExprInline(e.rangeMin) & "-" & emitExprInline(e.rangeMax)
-  of ekSet: return "@" & e.setName
+  of ekString:   e.strVal
+  of ekInt:      $e.intVal
+  of ekBool:     (if e.boolVal: "1" else: "0")
+  of ekPrefix:   e.prefixAddr & "/" & $e.prefixLen
+  of ekRange:    e.rangeMin.toText & "-" & e.rangeMax.toText
+  of ekSet:      "@" & e.setName
   of ekList:
-    if e.listElems.len == 1:
-      return emitExprInline(e.listElems[0])
-    return "{ " & e.listElems.mapIt(emitExprInline(it)).join(", ") & " }"
-  of ekConcat:
-    return e.concatExprs.mapIt(emitExprInline(it)).join(" . ")
-  of ekPayload:
-    return e.payloadProto & " " & e.payloadField
+    if e.listElems.len == 1: e.listElems[0].toText
+    else: "{ " & e.listElems.mapIt(it.toText).join(", ") & " }"
+  of ekConcat:   e.concatExprs.mapIt(it.toText).join(" . ")
+  of ekPayload:  e.payloadProto & " " & e.payloadField
   of ekMeta:
-    return "meta " & e.metaKey
+    case e.metaKey
+    of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype": e.metaKey
+    else: "meta " & e.metaKey
   of ekCt:
-    result = "ct"
-    if e.ctDir != "":
-      result &= " " & e.ctDir
-    result &= " " & e.ctKey
-  of ekFib:
-    result = "fib " & e.fibFlags.join(" . ") & " " & e.fibResult
-  of ekMap:
-    return emitExprInline(e.mapKey) & " map @" & e.mapData
-  of ekElem:
-    return emitExprInline(e.elemVal)
+    var r = "ct"
+    if e.ctDir != "": r &= " " & e.ctDir
+    r & " " & e.ctKey
+  of ekFib:      "fib " & e.fibFlags.join(" . ") & " " & e.fibResult
+  of ekMap:      e.mapKey.toText & " map @" & e.mapData
+  of ekElem:     e.elemVal.toText
+  of ekVerdict:
+    if e.verdictTarget != "": e.verdictKind & " " & e.verdictTarget
+    else: e.verdictKind
+  of ekBinOp:
+    if e.binOp == "|": e.binLeft.toText & "|" & e.binRight.toText
+    else: e.binLeft.toText & " " & e.binOp & " " & e.binRight.toText
+  of ekAnonymousSet:
+    if e.anonSetElems.len == 1: e.anonSetElems[0].toText
+    elif e.anonSetElems.len > 0 and e.anonSetElems[0].kind == ekList:
+      var parts: seq[string]
+      for elem in e.anonSetElems:
+        if elem.kind == ekList and elem.listElems.len == 2:
+          parts.add elem.listElems[0].toText & " : " & elem.listElems[1].toText
+        else: parts.add elem.toText
+      "{ " & parts.join(", ") & " }"
+    else:
+      "{ " & e.anonSetElems.mapIt(it.toText).join(", ") & " }"
 
-proc emitExpr(w: var Writer, e: Expr) =
-  w.add emitExprInline(e)
-
-# ---------------------------------------------------------------------------
-# Emit a value for the right side of a match (handles sets, ranges, etc.)
-# ---------------------------------------------------------------------------
-
-proc emitMatchRight(e: Expr): string =
-  ## Like emitExprInline but without quoting plain strings (they're values like "established").
+proc toMatchLeft*(e: Expr): string =
+  if e == nil: return "null"
   case e.kind
-  of ekString: return e.strVal
-  of ekInt: return $e.intVal
-  of ekBool: return if e.boolVal: "1" else: "0"
-  of ekPrefix: return e.prefixAddr & "/" & $e.prefixLen
-  of ekRange: return emitMatchRight(e.rangeMin) & "-" & emitMatchRight(e.rangeMax)
-  of ekSet: return "@" & e.setName
-  of ekList:
-    if e.listElems.len == 1:
-      return emitMatchRight(e.listElems[0])
-    return "{ " & e.listElems.mapIt(emitMatchRight(it)).join(", ") & " }"
-  of ekConcat:
-    return e.concatExprs.mapIt(emitMatchRight(it)).join(" . ")
-  else:
-    return emitExprInline(e)
+  of ekBinOp:
+    if e.binOp == "&":
+      let r = if e.binRight.kind == ekList:
+                "(" & e.binRight.listElems.mapIt(it.toText).join("|") & ")"
+              else: "(" & e.binRight.toText & ")"
+      e.binLeft.toMatchLeft & " & " & r
+    else: e.binLeft.toMatchLeft & " " & e.binOp & " " & e.binRight.toText
+  of ekConcat: e.concatExprs.mapIt(it.toMatchLeft).join(" . ")
+  else: e.toText
 
-# ---------------------------------------------------------------------------
-# Emit left side of match (payload, meta, ct -- unquoted)
-# ---------------------------------------------------------------------------
-
-proc emitMetaKey(key: string): string =
-  ## Emit a meta key -- common keys omit the "meta" prefix in nftables text.
-  case key
-  of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype":
-    return key
-  else:
-    return "meta " & key
-
-proc emitMatchLeft(e: Expr): string =
+proc toQuoted*(e: Expr): string =
+  if e == nil: return "null"
   case e.kind
-  of ekPayload:
-    return e.payloadProto & " " & e.payloadField
-  of ekMeta:
-    return emitMetaKey(e.metaKey)
-  of ekCt:
-    result = "ct"
-    if e.ctDir != "":
-      result &= " " & e.ctDir
-    result &= " " & e.ctKey
-  of ekFib:
-    return "fib " & e.fibFlags.join(" . ") & " " & e.fibResult
-  of ekConcat:
-    # Concat of match-left expressions: "iifname . oifname"
-    return e.concatExprs.mapIt(emitMatchLeft(it)).join(" . ")
-  else:
-    return emitExprInline(e)
+  of ekString: "\"" & e.strVal & "\""
+  else: e.toText
 
 # ---------------------------------------------------------------------------
-# Statement emission
+# Stmt → text
 # ---------------------------------------------------------------------------
 
-proc emitStmt(w: var Writer, s: Stmt) =
+proc emitStmt*(w: var Writer, s: Stmt) =
   case s.kind
   of skMatch:
-    let left = emitMatchLeft(s.matchLeft)
-    let right = emitMatchRight(s.matchRight)
-    # nftables text omits "==" operator -- it's implied
-    if s.matchOp == opEq:
-      w.add left & " " & right
-    elif s.matchOp == opNeq:
-      w.add left & " != " & right
-    else:
-      w.add left & " " & $s.matchOp & " " & right
-  of skAccept:
-    w.add "accept"
-  of skDrop:
-    w.add "drop"
-  of skReturn:
-    w.add "return"
+    let left = s.matchLeft.toMatchLeft
+    let right = s.matchRight.toText
+    case s.matchOp
+    of opEq, opIn: w.add left & " " & right
+    of opNot:
+      if s.matchRight.kind == ekList:
+        w.add left & " ! " & s.matchRight.listElems.mapIt(it.toText).join(",")
+      else: w.add left & " ! " & right
+    of opNeq: w.add left & " != " & right
+    else: w.add left & " " & $s.matchOp & " " & right
+  of skAccept:     w.add "accept"
+  of skDrop:       w.add "drop"
+  of skReturn:     w.add "return"
   of skReject:
     w.add "reject"
-    if s.rejectType != "":
-      w.add " with " & s.rejectType
-      if s.rejectExpr != "":
-        w.add " " & s.rejectExpr
-  of skJump:
-    w.add "jump " & s.jumpTarget
-  of skGoto:
-    w.add "goto " & s.gotoTarget
+    if s.rejectType != "": w.add " with " & s.rejectType
+    if s.rejectExpr != "": w.add " " & s.rejectExpr
+  of skJump:       w.add "jump " & s.jumpTarget
+  of skGoto:       w.add "goto " & s.gotoTarget
   of skCounter:
-    if s.counterName != "":
-      w.add "counter name " & s.counterName
-    else:
-      w.add "counter"
+    if s.counterName != "": w.add "counter name " & s.counterName
+    else: w.add "counter"
   of skLog:
     w.add "log"
-    if s.logPrefix != "":
-      w.add " prefix \"" & s.logPrefix & "\""
-    if s.logLevel != "":
-      w.add " level " & s.logLevel
+    if s.logPrefix != "": w.add " prefix \"" & s.logPrefix & "\""
+    if s.logLevel != "": w.add " level " & s.logLevel
   of skLimit:
     w.add "limit rate "
-    if s.limitInv:
-      w.add "over "
+    if s.limitInv: w.add "over "
     w.add $s.limitRate & "/" & s.limitPer
-    if s.limitBurst > 0:
-      w.add " burst " & $s.limitBurst & " packets"
+    if s.limitBurst > 0: w.add " burst " & $s.limitBurst & " packets"
   of skDnat:
     w.add "dnat " & s.dnatFamily & " to " & s.dnatAddr
-    if s.dnatPort > 0:
-      w.add ":" & $s.dnatPort
+    if s.dnatPort > 0: w.add ":" & $s.dnatPort
   of skSnat:
     w.add "snat " & s.snatFamily & " to " & s.snatAddr
-    if s.snatPort > 0:
-      w.add ":" & $s.snatPort
+    if s.snatPort > 0: w.add ":" & $s.snatPort
   of skMasquerade:
     w.add "masquerade"
-    if s.masqPort > 0:
-      w.add " to :" & $s.masqPort
-  of skVmap:
-    let key = emitMatchLeft(s.vmapKey)
-    w.add key & " vmap " & emitMatchRight(s.vmapData)
-  of skMangle:
-    w.add "meta " & emitExprInline(s.mangleKey) & " set " & emitExprInline(s.mangleValue)
+    if s.masqPort > 0: w.add " to :" & $s.masqPort
+  of skVmap:    w.add s.vmapKey.toMatchLeft & " vmap " & s.vmapData.toText
+  of skMangle:  w.add s.mangleKey.toText & " set " & s.mangleValue.toText
   of skUpdate:
-    w.add "update @" & s.updateSet & " { " & emitMatchLeft(s.updateKey)
-    for sub in s.updateStmts:
-      w.add " "
-      w.emitStmt(sub)
+    w.add "update @" & s.updateSet & " { " & s.updateKey.toMatchLeft
+    for sub in s.updateStmts: w.add " "; w.emitStmt(sub)
     w.add " }"
 
-proc emitRuleExprs(w: var Writer, exprs: seq[Stmt]) =
-  ## Emit a rule's statement list as a single line.
-  for i, s in exprs:
-    if i > 0:
-      w.add " "
+proc emitRuleLine(w: var Writer, stmts: seq[Stmt], comment: string) =
+  w.addIndent()
+  for i, s in stmts:
+    if i > 0: w.add " "
     w.emitStmt(s)
+  if comment != "": w.add " comment \"" & comment & "\""
+  w.buf.add '\n'
+  w.atLineStart = true
 
 # ---------------------------------------------------------------------------
-# Top-level: group objects by table and emit nested text
+# Priority formatting
 # ---------------------------------------------------------------------------
 
-type
-  TableGroup = object
-    table: NftObject
-    chains: seq[NftObject]
-    rules: seq[NftObject]       # grouped by chain below
-    sets: seq[NftObject]
-    maps: seq[NftObject]
+proc priorityText(hook, chainType: string, prio: int): string =
+  let (baseName, baseVal) = case hook
+    of "prerouting":
+      if chainType == "nat": ("dstnat", -100) else: ("filter", 0)
+    of "postrouting":
+      if chainType == "nat": ("srcnat", 100) else: ("filter", 0)
+    else: ("filter", 0)
+  let diff = prio - baseVal
+  if diff == 0: baseName
+  elif diff > 0: baseName & " + " & $diff
+  else: baseName & " - " & $(-diff)
+
+# ---------------------------------------------------------------------------
+# Top-level: NftRuleset → text
+# ---------------------------------------------------------------------------
 
 proc emitText*(rs: NftRuleset): string =
   var w = newWriter()
 
-  # First pass: emit any delete/flush commands and comments at top level
-  for obj in rs.objects:
-    case obj.kind
-    of nokDelete:
-      w.line(obj.deleteWhat & " " & obj.deleteFamily & " " & obj.deleteName)
-    of nokComment:
-      w.line("# " & obj.commentText)
-    else:
-      discard
+  # Group by table
+  type TK = tuple[family, name: string]
+  var tableOrder: seq[TK]
+  var chains: Table[TK, seq[NftChain]]
+  var rules: Table[TK, seq[NftRule]]
+  var sets: Table[TK, seq[NftSet]]
+  var maps: Table[TK, seq[NftMap]]
 
-  # Group objects by table
-  type TableKey = tuple[family, name: string]
-  var tableOrder: seq[TableKey]
-  var groups: Table[TableKey, TableGroup]
-
-  for obj in rs.objects:
-    case obj.kind
-    of nokTable:
-      let key: TableKey = (obj.tableFamily, obj.tableName)
-      if key notin groups:
+  for cmd in rs.nftables:
+    if cmd.kind != nckAdd: continue
+    case cmd.add.kind
+    of nakTable:
+      let t = cmd.add.table
+      let key: TK = (t.family, t.name)
+      if key notin chains:
         tableOrder.add key
-        groups[key] = TableGroup(table: obj)
-    of nokChain:
-      let key: TableKey = (obj.chainFamily, obj.chainTable)
-      if key in groups:
-        groups[key].chains.add obj
-    of nokRule:
-      let key: TableKey = (obj.ruleFamily, obj.ruleTable)
-      if key in groups:
-        groups[key].rules.add obj
-    of nokSet:
-      let key: TableKey = (obj.setFamily, obj.setTable)
-      if key in groups:
-        groups[key].sets.add obj
-    of nokMap:
-      let key: TableKey = (obj.mapFamily, obj.mapTable)
-      if key in groups:
-        groups[key].maps.add obj
-    else:
-      discard
+        chains[key] = @[]; rules[key] = @[]; sets[key] = @[]; maps[key] = @[]
+    of nakChain:
+      let c = cmd.add.chain
+      let key: TK = (c.family, c.table)
+      if key in chains: chains[key].add c
+    of nakRule:
+      let r = cmd.add.rule
+      let key: TK = (r.family, r.table)
+      if key in rules: rules[key].add r
+    of nakSet:
+      let s = cmd.add.set
+      let key: TK = (s.family, s.table)
+      if key in sets: sets[key].add s
+    of nakMap:
+      let m = cmd.add.map
+      let key: TK = (m.family, m.table)
+      if key in maps: maps[key].add m
 
-  # Emit each table
   for key in tableOrder:
-    let g = groups[key]
-    let tbl = g.table
+    let (fam, name) = key
+    let tblId = fam & " " & name
 
-    # Atomic replacement: declare table, delete, re-declare with contents
-    w.line("table " & tbl.tableFamily & " " & tbl.tableName)
-    w.line("delete table " & tbl.tableFamily & " " & tbl.tableName)
+    w.line("table " & tblId)
+    w.line("delete table " & tblId)
     w.emptyLine()
 
-    w.braced("table " & tbl.tableFamily & " " & tbl.tableName):
-      # Sets
-      for s in g.sets:
+    w.braced("table " & tblId):
+      for s in sets[key]:
         w.emptyLine()
-        w.braced("set " & s.setName):
+        w.braced("set " & s.name):
           w.line("type " & s.setType)
-          if s.setFlags.len > 0:
-            w.line("flags " & s.setFlags.join(", "))
-          if s.setSize > 0:
-            w.line("size " & $s.setSize)
-          if s.setTimeout > 0:
-            w.line("timeout " & $s.setTimeout & "s")
-          if s.setElems.len > 0:
-            w.line("elements = { " & s.setElems.mapIt(emitMatchRight(it)).join(", ") & " }")
+          if s.flags.isSome: w.line("flags " & s.flags.get.join(", "))
+          if s.size.isSome: w.line("size " & $s.size.get)
+          if s.timeout.isSome: w.line("timeout " & $s.timeout.get & "s")
+          if s.elem.isSome:
+            w.line("elements = { " & s.elem.get.mapIt(it.toText).join(", ") & " }")
 
-      # Maps
-      for m in g.maps:
+      for m in maps[key]:
         w.emptyLine()
-        w.braced("map " & m.mapName):
-          if m.mapValueType == "verdict":
-            w.line("type " & m.mapKeyType & " : verdict")
-          else:
-            w.line("type " & m.mapKeyType & " : " & m.mapValueType)
-          if m.mapFlags.len > 0:
-            w.line("flags " & m.mapFlags.join(", "))
-          if m.mapElems.len > 0:
+        w.braced("map " & m.name):
+          let typeStr = if m.mapType == "verdict": m.keyType & " : verdict"
+                        else: m.keyType & " : " & m.mapType
+          w.line("type " & typeStr)
+          if m.flags.isSome: w.line("flags " & m.flags.get.join(", "))
+          if m.elem.isSome:
             w.line("elements = {")
             w.indented:
-              for i, elem in m.mapElems:
-                let kStr = emitExprInline(elem.key)  # keys need quoting
-                let vStr = emitMatchRight(elem.value) # values like "jump X" don't
-                let comma = if i < m.mapElems.len - 1: "," else: ""
-                w.line(kStr & " : " & vStr & comma)
+              let elems = m.elem.get
+              for i, elem in elems:
+                let comma = if i < elems.len - 1: "," else: ""
+                w.line(elem.key.toQuoted & " : " & elem.value.toText & comma)
             w.line("}")
 
-      # Group rules by chain for emission
-      var chainRules: Table[string, seq[NftObject]]
-      for r in g.rules:
-        if r.ruleChain notin chainRules:
-          chainRules[r.ruleChain] = @[]
-        chainRules[r.ruleChain].add r
+      # Group rules by chain
+      var chainRules: Table[string, seq[NftRule]]
+      for r in rules[key]:
+        if r.chain notin chainRules: chainRules[r.chain] = @[]
+        chainRules[r.chain].add r
 
-      # Chains + their rules
-      for c in g.chains:
-        let rules = chainRules.getOrDefault(c.chainName, @[])
-
-        # Optimize: single-statement chains on one line
-        if not c.chainIsBase and rules.len == 1 and rules[0].ruleExprs.len == 1:
-          let onlyStmt = rules[0].ruleExprs[0]
-          if onlyStmt.kind in {skAccept, skDrop}:
-            var inline = ""
-            case onlyStmt.kind
-            of skAccept: inline = "accept"
-            of skDrop: inline = "drop"
-            else: discard
-            w.emptyLine()
-            w.bracedOneline("chain " & c.chainName, inline)
-            continue
-
+      for c in chains[key]:
+        let cRules = chainRules.getOrDefault(c.name, @[])
         w.emptyLine()
-        w.braced("chain " & c.chainName):
-          # Base chain header
-          if c.chainIsBase:
-            # Map priority to named base + offset
-            # Standard named priorities: filter=0, dstnat=-100, srcnat=100
-            let (baseName, baseVal) = case c.chainHook
-              of nchPrerouting:
-                if c.chainType == nctNat: ("dstnat", -100)
-                else: ("filter", 0)
-              of nchPostrouting:
-                if c.chainType == nctNat: ("srcnat", 100)
-                else: ("filter", 0)
-              else: ("filter", 0)
-            let diff = c.chainPrio - baseVal
-            let prio = if diff == 0: baseName
-                       elif diff > 0: baseName & " + " & $diff
-                       else: baseName & " - " & $(-diff)
-            w.line("type " & $c.chainType & " hook " & $c.chainHook &
-                   " priority " & prio & "; policy " & $c.chainPolicy & ";")
-
-          # Rules
-          for r in rules:
-            w.add ""
-            w.emitRuleExprs(r.ruleExprs)
-            if r.ruleComment != "":
-              w.add " comment \"" & r.ruleComment & "\""
-            w.buf.add '\n'
-            w.atLineStart = true
+        w.braced("chain " & c.name):
+          if c.chainType.isSome:
+            let prio = priorityText(c.hook.get, c.chainType.get, c.prio.get)
+            w.line("type " & c.chainType.get & " hook " & c.hook.get &
+                   " priority " & prio & "; policy " & c.policy.get & ";")
+          for r in cRules:
+            let comment = if r.comment.isSome: r.comment.get else: ""
+            w.emitRuleLine(r.expr, comment)
 
     w.emptyLine()
 
-  result = w.result()
+  w.result()

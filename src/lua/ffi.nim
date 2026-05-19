@@ -3,7 +3,7 @@
 
 import std/os
 
-const luaSrcDir = currentSourcePath.parentDir.parentDir / "vendor" / "lua54" / "src"
+const luaSrcDir = currentSourcePath.parentDir.parentDir.parentDir / "vendor" / "lua54" / "src"
 
 template luaSrc(file: string): string = luaSrcDir / file
 

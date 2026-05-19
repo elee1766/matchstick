@@ -1,237 +1,12 @@
-## lua_vm.nim - Sets up the Lua VM with fw:* and util:* API methods.
+## lua/api.nim - fw:* and util:* API method implementations.
 ##
-## The fw object is a Lua table whose methods are C functions (LuaCFunction).
-## Each method retrieves the FirewallState from the Lua registry and operates on it.
-##
-## Zone/Host/Service handles returned to Lua are tables with a type tag
-## so we can distinguish them when they're passed back as arguments.
+## Each method is a LuaCFunction that retrieves FirewallState from the
+## Lua registry and operates on it. setupLuaVM registers them all.
 
-import std/[os, options, tables, strutils]
-import ./lua_ffi
-import ./types
-
-const
-  ## Registry key for the FirewallState pointer
-  stateRegistryKey = "matchstick.state"
-
-  ## Registry key for the directory of the currently executing config file
-  configDirRegistryKey = "matchstick.configdir"
-
-  ## Metatable names for handle types
-  zoneHandleMT*  = "matchstick.zone"
-  hostHandleMT*  = "matchstick.host"
-  serviceHandleMT* = "matchstick.service"
-
-# ---------------------------------------------------------------------------
-# Helpers: get state from Lua registry
-# ---------------------------------------------------------------------------
-
-proc getState(L: LuaState): FirewallState =
-  ## Retrieve the FirewallState pointer from the Lua registry.
-  discard lua_getfield(L, LUA_REGISTRYINDEX, stateRegistryKey)
-  result = cast[FirewallState](lua_touserdata(L, -1))
-  lua_pop(L, 1)
-
-proc getConfigDir(L: LuaState): string =
-  discard lua_getfield(L, LUA_REGISTRYINDEX, configDirRegistryKey)
-  if lua_type(L, -1) == LUA_TSTRING:
-    result = $lua_tostring(L, -1)
-  lua_pop(L, 1)
-
-proc setConfigDir(L: LuaState, dir: string) =
-  discard lua_pushstring(L, dir.cstring)
-  lua_setfield(L, LUA_REGISTRYINDEX, configDirRegistryKey)
-
-proc getCurrentLine(L: LuaState): int =
-  ## Get the current Lua source line number (for error messages).
-  luaL_where(L, 1)
-  let s = $lua_tostring(L, -1)
-  lua_pop(L, 1)
-  # Format is "filename:line: " -- extract the line number
-  let parts = s.split(':')
-  if parts.len >= 2:
-    try: result = parseInt(parts[^2].strip())
-    except: result = 0
-
-# ---------------------------------------------------------------------------
-# Helpers: read Lua arguments
-# ---------------------------------------------------------------------------
-
-proc getStringField(L: LuaState, idx: cint, key: string): string =
-  ## Read a string field from a table at stack index `idx`. Returns "" if not present.
-  discard lua_getfield(L, idx, key.cstring)
-  if lua_type(L, -1) == LUA_TSTRING:
-    result = $lua_tostring(L, -1)
-  lua_pop(L, 1)
-
-proc getBoolField(L: LuaState, idx: cint, key: string, default: bool): bool =
-  ## Read a boolean field from a table. Returns `default` if not present.
-  discard lua_getfield(L, idx, key.cstring)
-  if lua_isboolean(L, -1):
-    result = lua_toboolean(L, -1) != 0
-  elif lua_isnoneornil(L, -1):
-    result = default
-  else:
-    result = default
-  lua_pop(L, 1)
-
-proc getIntField(L: LuaState, idx: cint, key: string, default: int): int =
-  discard lua_getfield(L, idx, key.cstring)
-  if lua_isinteger(L, -1) != 0:
-    result = int(lua_tointeger(L, -1))
-  elif lua_isnoneornil(L, -1):
-    result = default
-  else:
-    result = default
-  lua_pop(L, 1)
-
-proc getStringArray(L: LuaState, idx: cint): seq[string] =
-  ## Read a value that's either a string, integer, or an array of strings/integers.
-  let absIdx = lua_absindex(L, idx)
-  if lua_type(L, absIdx) == LUA_TSTRING:
-    result = @[$lua_tostring(L, absIdx)]
-  elif lua_isinteger(L, absIdx) != 0:
-    result = @[$lua_tointeger(L, absIdx)]
-  elif lua_isnumber(L, absIdx) != 0:
-    result = @[$int(lua_tonumber(L, absIdx))]
-  elif lua_istable(L, absIdx):
-    let len = luaL_len(L, absIdx)
-    for i in 1..len:
-      discard lua_rawgeti(L, absIdx, i.clonglong)
-      if lua_type(L, -1) == LUA_TSTRING:
-        result.add $lua_tostring(L, -1)
-      elif lua_isinteger(L, -1) != 0:
-        result.add $lua_tointeger(L, -1)
-      lua_pop(L, 1)
-
-proc getStringArrayField(L: LuaState, idx: cint, key: string): seq[string] =
-  discard lua_getfield(L, idx, key.cstring)
-  if not lua_isnoneornil(L, -1):
-    result = getStringArray(L, -1)
-  lua_pop(L, 1)
-
-# ---------------------------------------------------------------------------
-# Helpers: push handle tables back to Lua
-# ---------------------------------------------------------------------------
-
-proc pushZoneHandle(L: LuaState, zone: Zone) =
-  ## Push a zone handle table onto the Lua stack.
-  lua_newtable(L)
-  discard lua_pushstring(L, zone.name.cstring)
-  lua_setfield(L, -2, "__name")
-  discard lua_pushstring(L, "zone")
-  lua_setfield(L, -2, "__type")
-  # Set the metatable so we can identify it
-  discard luaL_getmetatable(L, zoneHandleMT)
-  if lua_istable(L, -1):
-    discard lua_setmetatable(L, -2)
-  else:
-    lua_pop(L, 1)
-
-proc pushHostHandle(L: LuaState, host: Host) =
-  lua_newtable(L)
-  discard lua_pushstring(L, host.name.cstring)
-  lua_setfield(L, -2, "__name")
-  discard lua_pushstring(L, "host")
-  lua_setfield(L, -2, "__type")
-  discard luaL_getmetatable(L, hostHandleMT)
-  if lua_istable(L, -1):
-    discard lua_setmetatable(L, -2)
-  else:
-    lua_pop(L, 1)
-
-proc pushServiceHandle(L: LuaState, svc: Service) =
-  lua_newtable(L)
-  discard lua_pushstring(L, svc.name.cstring)
-  lua_setfield(L, -2, "__name")
-  discard lua_pushstring(L, "service")
-  lua_setfield(L, -2, "__type")
-  discard luaL_getmetatable(L, serviceHandleMT)
-  if lua_istable(L, -1):
-    discard lua_setmetatable(L, -2)
-  else:
-    lua_pop(L, 1)
-
-# ---------------------------------------------------------------------------
-# Helpers: resolve endpoints (zone/host from handle or string)
-# ---------------------------------------------------------------------------
-
-proc resolveEndpoint(L: LuaState, state: FirewallState, idx: cint): Endpoint =
-  ## Resolve a Lua value at `idx` to an Endpoint.
-  ## Accepts: zone handle, host handle, or string name.
-  let absIdx = lua_absindex(L, idx)
-
-  if lua_type(L, absIdx) == LUA_TSTRING:
-    let name = $lua_tostring(L, absIdx)
-    if name == "*":
-      # Wildcard -- return a nil-zone endpoint (handled specially)
-      return Endpoint()
-    if name in state.zones:
-      return Endpoint(zone: state.zones[name])
-    elif name in state.hosts:
-      let host = state.hosts[name]
-      return Endpoint(zone: host.zone, host: some(host))
-    else:
-      discard luaL_error(L, "unknown zone or host: '%s'", name.cstring)
-
-  elif lua_istable(L, absIdx):
-    let typ = getStringField(L, absIdx, "__type")
-    let name = getStringField(L, absIdx, "__name")
-    if typ == "zone":
-      if name in state.zones:
-        return Endpoint(zone: state.zones[name])
-      else:
-        discard luaL_error(L, "zone handle refers to unknown zone: '%s'", name.cstring)
-    elif typ == "host":
-      if name in state.hosts:
-        let host = state.hosts[name]
-        return Endpoint(zone: host.zone, host: some(host))
-      else:
-        discard luaL_error(L, "host handle refers to unknown host: '%s'", name.cstring)
-    else:
-      discard luaL_error(L, "expected zone or host handle, got table with __type='%s'", typ.cstring)
-
-  else:
-    discard luaL_error(L, "expected zone/host handle or string, got %s",
-                       lua_typename(L, lua_type(L, absIdx)))
-
-proc resolveService(L: LuaState, state: FirewallState, idx: cint): Option[Service] =
-  ## Resolve a service handle or string at `idx`. Returns none if nil.
-  let absIdx = lua_absindex(L, idx)
-  if lua_isnoneornil(L, absIdx):
-    return none(Service)
-  if lua_type(L, absIdx) == LUA_TSTRING:
-    let name = $lua_tostring(L, absIdx)
-    if name in state.services:
-      return some(state.services[name])
-    else:
-      discard luaL_error(L, "unknown service: '%s'", name.cstring)
-  elif lua_istable(L, absIdx):
-    let typ = getStringField(L, absIdx, "__type")
-    let name = getStringField(L, absIdx, "__name")
-    if typ == "service":
-      if name in state.services:
-        return some(state.services[name])
-      else:
-        discard luaL_error(L, "service handle refers to unknown service: '%s'", name.cstring)
-  discard luaL_error(L, "expected service handle or string, got %s",
-                     lua_typename(L, lua_type(L, absIdx)))
-
-proc resolveHostAddr(L: LuaState, state: FirewallState, idx: cint): string =
-  ## Resolve a host handle or IP string to an address string.
-  let absIdx = lua_absindex(L, idx)
-  if lua_type(L, absIdx) == LUA_TSTRING:
-    let s = $lua_tostring(L, absIdx)
-    if s in state.hosts:
-      return state.hosts[s].addr4
-    return s  # raw IP string
-  elif lua_istable(L, absIdx):
-    let typ = getStringField(L, absIdx, "__type")
-    let name = getStringField(L, absIdx, "__name")
-    if typ == "host":
-      if name in state.hosts:
-        return state.hosts[name].addr4
-  discard luaL_error(L, "expected host handle or IP string")
+import std/[os, options, tables]
+import ./ffi
+import ./helpers
+import ../types
 
 # ---------------------------------------------------------------------------
 # fw:zone(name, iface?, opts?)
@@ -275,7 +50,7 @@ proc fwZone(L: LuaState): cint {.cdecl.} =
     zone.bridge = getBoolField(L, 4, "bridge", zone.bridge)
 
   state.zones[name] = zone
-  pushZoneHandle(L, zone)
+  pushHandle(L, zone.name, "zone", zoneHandleMT)
   return 1  # return the handle
 
 # ---------------------------------------------------------------------------
@@ -313,7 +88,7 @@ proc fwHost(L: LuaState): cint {.cdecl.} =
   )
 
   state.hosts[name] = host
-  pushHostHandle(L, host)
+  pushHandle(L, host.name, "host", hostHandleMT)
   return 1
 
 # ---------------------------------------------------------------------------
@@ -390,7 +165,7 @@ proc fwService(L: LuaState): cint {.cdecl.} =
 
   var svc = Service(name: name, entries: entries, line: line)
   state.services[name] = svc
-  pushServiceHandle(L, svc)
+  pushHandle(L, svc.name, "service", serviceHandleMT)
   return 1
 
 # ---------------------------------------------------------------------------
@@ -444,13 +219,7 @@ proc fwPolicy(L: LuaState): cint {.cdecl.} =
   let dst = resolveEndpoint(L, state, 3)
   let actionStr = $luaL_checkstring(L, 4)
 
-  let action = case actionStr
-    of "accept": actAccept
-    of "drop": actDrop
-    of "reject": actReject
-    else:
-      discard luaL_error(L, "fw:policy: action must be accept/drop/reject, got '%s'", actionStr.cstring)
-      actDrop
+  let action = parseAction(L, actionStr, "fw:policy")
 
   var log = false
   if lua_istable(L, 5):
@@ -471,13 +240,7 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
   let dst = resolveEndpoint(L, state, 3)
   let actionStr = $luaL_checkstring(L, 4)
 
-  let action = case actionStr
-    of "accept": actAccept
-    of "drop": actDrop
-    of "reject": actReject
-    else:
-      discard luaL_error(L, "fw:rule: action must be accept/drop/reject, got '%s'", actionStr.cstring)
-      actDrop
+  let action = parseAction(L, actionStr, "fw:rule")
 
   var rule = Rule(src: src, dst: dst, action: action, line: line)
 
@@ -505,6 +268,15 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
       rule.port = getStringArrayField(L, 5, "port")
       rule.saddrList = getStringField(L, 5, "saddr_list")
       rule.log = getStringField(L, 5, "log")
+
+      # Raw daddr (IP string for forward rules to specific destinations)
+      let rawDaddr = getStringField(L, 5, "daddr")
+      if rawDaddr != "":
+        # Could be a host handle name or raw IP
+        if rawDaddr in state.hosts:
+          rule.daddrRaw = state.hosts[rawDaddr].addr4
+        else:
+          rule.daddrRaw = rawDaddr
 
       # Rate limit
       discard lua_getfield(L, 5, "rate")
@@ -657,6 +429,19 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
 
   let ll = getStringField(L, 2, "log_level")
   if ll != "": state.config.logLevel = ll
+
+  let fam = getStringField(L, 2, "family")
+  if fam != "": state.config.family = fam
+
+  state.config.logSetSize = getIntField(L, 2, "log_set_size", state.config.logSetSize)
+  state.config.logSetTimeout = getIntField(L, 2, "log_set_timeout", state.config.logSetTimeout)
+  state.config.counter = getBoolField(L, 2, "counter", state.config.counter)
+
+  let ip = getStringField(L, 2, "input_policy")
+  if ip != "": state.config.inputPolicy = ip
+
+  let op = getStringField(L, 2, "output_policy")
+  if op != "": state.config.outputPolicy = op
 
   return 0
 

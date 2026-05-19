@@ -138,6 +138,16 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
   # ------------------------------------------------------------------
   # Shadow detection
   # ------------------------------------------------------------------
+
+  proc endpointShadows(earlier, later: Endpoint): bool =
+    ## Does `earlier` endpoint shadow (match a superset of) `later`?
+    if earlier.host.isNone and later.host.isSome:
+      return later.zone == earlier.zone  # zone shadows host in that zone
+    elif earlier.host.isNone and later.host.isNone:
+      return true  # same zone
+    elif earlier.host.isSome and later.host.isSome:
+      return earlier.host.get.name == later.host.get.name
+    return false
   # Group rules by zone pair (src zone name, dst zone name)
   type ZPKey = tuple[src, dst: string]
   var rulesByPair: Table[ZPKey, seq[Rule]]
@@ -159,29 +169,10 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
         # 2. services/ports overlap
         # 3. same or broader action scope
 
-        var srcShadowed = false
-        var dstShadowed = false
         var portShadowed = false
 
-        # Source: zone shadows any host in that zone
-        if earlier.src.host.isNone and later.src.host.isSome:
-          if later.src.zone == earlier.src.zone:
-            srcShadowed = true
-        elif earlier.src.host.isNone and later.src.host.isNone:
-          srcShadowed = true  # same zone
-        elif earlier.src.host.isSome and later.src.host.isSome:
-          if earlier.src.host.get.name == later.src.host.get.name:
-            srcShadowed = true
-
-        # Dest: same logic
-        if earlier.dst.host.isNone and later.dst.host.isSome:
-          if later.dst.zone == earlier.dst.zone:
-            dstShadowed = true
-        elif earlier.dst.host.isNone and later.dst.host.isNone:
-          dstShadowed = true
-        elif earlier.dst.host.isSome and later.dst.host.isSome:
-          if earlier.dst.host.get.name == later.dst.host.get.name:
-            dstShadowed = true
+        let srcShadowed = endpointShadows(earlier.src, later.src)
+        let dstShadowed = endpointShadows(earlier.dst, later.dst)
 
         # Port/service overlap check
         # Rules with saddr_list are specific to that list -- don't shadow

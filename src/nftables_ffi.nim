@@ -57,84 +57,31 @@ type
     output*: string
     error*: string
 
-proc nftValidate*(ruleset: string): NftResult =
-  ## Validate an nftables ruleset (text format) via dry-run.
-  ## Returns success/failure with error messages.
+proc runNft(cmd: string, dryRun = false, jsonInput = false): NftResult =
+  ## Run an nftables command via libnftables, returning output and errors.
   let ctx = nft_ctx_new(0)
   if ctx == nil:
     return NftResult(success: false, error: "failed to create nft context")
   defer: nft_ctx_free(ctx)
 
-  nft_ctx_set_dry_run(ctx, true)
+  if dryRun: nft_ctx_set_dry_run(ctx, true)
+  if jsonInput: nft_ctx_input_set_flags(ctx, NFT_CTX_INPUT_JSON)
   discard nft_ctx_buffer_output(ctx)
   discard nft_ctx_buffer_error(ctx)
 
-  let rc = nft_run_cmd_from_buffer(ctx, ruleset.cstring)
-  result.success = (rc == 0)
-  result.output = $nft_ctx_get_output_buffer(ctx)
-  result.error = $nft_ctx_get_error_buffer(ctx)
-
-proc nftValidateJson*(ruleset: string): NftResult =
-  ## Validate an nftables ruleset (JSON format) via dry-run.
-  let ctx = nft_ctx_new(0)
-  if ctx == nil:
-    return NftResult(success: false, error: "failed to create nft context")
-  defer: nft_ctx_free(ctx)
-
-  nft_ctx_set_dry_run(ctx, true)
-  nft_ctx_input_set_flags(ctx, NFT_CTX_INPUT_JSON)
-  discard nft_ctx_buffer_output(ctx)
-  discard nft_ctx_buffer_error(ctx)
-
-  let rc = nft_run_cmd_from_buffer(ctx, ruleset.cstring)
-  result.success = (rc == 0)
-  result.output = $nft_ctx_get_output_buffer(ctx)
-  result.error = $nft_ctx_get_error_buffer(ctx)
-
-proc nftApply*(ruleset: string): NftResult =
-  ## Apply an nftables ruleset (text format) to the kernel.
-  ## Requires root privileges.
-  let ctx = nft_ctx_new(0)
-  if ctx == nil:
-    return NftResult(success: false, error: "failed to create nft context")
-  defer: nft_ctx_free(ctx)
-
-  discard nft_ctx_buffer_output(ctx)
-  discard nft_ctx_buffer_error(ctx)
-
-  let rc = nft_run_cmd_from_buffer(ctx, ruleset.cstring)
-  result.success = (rc == 0)
-  result.output = $nft_ctx_get_output_buffer(ctx)
-  result.error = $nft_ctx_get_error_buffer(ctx)
-
-proc nftListRuleset*(): NftResult =
-  ## List the current running nftables ruleset.
-  ## Requires root privileges.
-  let ctx = nft_ctx_new(0)
-  if ctx == nil:
-    return NftResult(success: false, error: "failed to create nft context")
-  defer: nft_ctx_free(ctx)
-
-  discard nft_ctx_buffer_output(ctx)
-  discard nft_ctx_buffer_error(ctx)
-
-  let rc = nft_run_cmd_from_buffer(ctx, "list ruleset")
-  result.success = (rc == 0)
-  result.output = $nft_ctx_get_output_buffer(ctx)
-  result.error = $nft_ctx_get_error_buffer(ctx)
-
-proc nftListTable*(family, name: string): NftResult =
-  ## List a specific nftables table.
-  let ctx = nft_ctx_new(0)
-  if ctx == nil:
-    return NftResult(success: false, error: "failed to create nft context")
-  defer: nft_ctx_free(ctx)
-
-  discard nft_ctx_buffer_output(ctx)
-  discard nft_ctx_buffer_error(ctx)
-
-  let cmd = "list table " & family & " " & name
   let rc = nft_run_cmd_from_buffer(ctx, cmd.cstring)
   result.success = (rc == 0)
   result.output = $nft_ctx_get_output_buffer(ctx)
   result.error = $nft_ctx_get_error_buffer(ctx)
+
+proc nftValidate*(ruleset: string): NftResult =
+  ## Validate an nftables ruleset (text format) via dry-run.
+  runNft(ruleset, dryRun = true)
+
+proc nftApply*(ruleset: string): NftResult =
+  ## Apply an nftables ruleset (text format) to the kernel. Requires root.
+  runNft(ruleset)
+
+proc nftListTable*(family, name: string): NftResult =
+  ## List a specific nftables table.
+  runNft("list table " & family & " " & name)

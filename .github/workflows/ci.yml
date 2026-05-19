@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  NIMBLE_DIR: ~/.nimble
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        nim:
+          - stable
+          - 2.2.x
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq liblua5.4-dev nftables libnftables-dev
+
+      - name: Setup Nim
+        uses: nim-lang/setup-nim@v1
+        with:
+          nim-version: ${{ matrix.nim }}
+
+      - name: Cache nimble packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nimble
+          key: ${{ runner.os }}-nimble-${{ matrix.nim }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-nimble-${{ matrix.nim }}-
+
+      - name: Install nimble dependencies
+        run: nimble install -y --depsOnly
+
+      - name: Build
+        run: nimble build -y
+
+      - name: Unit tests
+        run: |
+          for t in tests/test_*.nim; do
+            echo "--- $(basename $t) ---"
+            nim c -r --hints:off --warnings:off "$t"
+          done
+
+      - name: Integration tests
+        run: |
+          for t in tests/integration/test_*.nim; do
+            echo "--- $(basename $t) ---"
+            nim c -r --hints:off --warnings:off "$t"
+          done
+
+      - name: nftables validation test
+        run: |
+          unshare --user --net --map-root-user -- \
+            sh -c './matchstick render tests/testdata/full.lua 2>/dev/null | nft -c -f -'
+          unshare --user --net --map-root-user -- \
+            sh -c './matchstick render --json tests/testdata/full.lua 2>/dev/null | nft -j -c -f -'
+
+      - name: Binary smoke test
+        run: |
+          ./matchstick check tests/testdata/full.lua
+          ./matchstick show matrix tests/testdata/full.lua 2>/dev/null
+          ./matchstick show topology tests/testdata/full.lua --format=dot 2>/dev/null > /dev/null

@@ -1,0 +1,15 @@
+# Build output
+matchstick
+nimcache/
+nimblecache/
+
+# Test binaries
+tests/test_*
+!tests/test_*.nim
+
+# Coverage
+coverage/
+
+# OS
+.DS_Store
+~

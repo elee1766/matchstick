@@ -6,14 +6,14 @@
 
 type
   Writer* = object
-    buf: string
-    indent: int
-    atLineStart: bool
+    buf*: string
+    indent*: int
+    atLineStart*: bool
 
 proc newWriter*(cap: int = 4096): Writer =
   Writer(buf: newStringOfCap(cap), indent: 0, atLineStart: true)
 
-proc addIndent(w: var Writer) =
+proc addIndent*(w: var Writer) =
   if w.atLineStart:
     for i in 0 ..< w.indent:
       w.buf.add "    "  # 4-space indent (nftables convention)
@@ -48,14 +48,5 @@ template braced*(w: var Writer, header: string, body: untyped) =
   body
   dec w.indent
   w.line("}")
-
-proc bracedOneline*(w: var Writer, header: string, content: string) =
-  ## Emit "header { content }"
-  w.addIndent()
-  w.buf.add header
-  w.buf.add " { "
-  w.buf.add content
-  w.buf.add " }\n"
-  w.atLineStart = true
 
 proc result*(w: Writer): string = w.buf
