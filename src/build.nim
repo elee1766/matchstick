@@ -230,16 +230,33 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     matchStmt(opEq, payloadExpr("icmp", "type"),
       anonSetExpr(@[strExpr("destination-unreachable"), strExpr("time-exceeded"), strExpr("parameter-problem")])),
     acceptStmt()])
+  # Rate-limit echo-request (ping) to prevent ICMP flood
+  cmds.add addRule(fam, tn, "icmp_v4", @[
+    matchStmt(opEq, payloadExpr("icmp", "type"), strExpr("echo-request")),
+    limitStmt(10, "second", burst = 5),
+    acceptStmt()])
 
   cmds.add addChain(fam, tn, "icmp_v6")
+  # NDP and essential ICMPv6 -- always accept (required for IPv6 operation)
+  cmds.add addRule(fam, tn, "icmp_v6", @[
+    matchStmt(opEq, payloadExpr("icmpv6", "type"),
+      anonSetExpr(@[strExpr("nd-neighbor-solicit"), strExpr("nd-neighbor-advert"),
+        strExpr("nd-router-solicit"), strExpr("nd-router-advert"),
+        strExpr("mld-listener-query"), strExpr("mld-listener-report")])),
+    acceptStmt()])
+  # Error types -- accept without rate limit (important for PMTUD etc.)
   cmds.add addRule(fam, tn, "icmp_v6", @[
     matchStmt(opEq, payloadExpr("icmpv6", "type"),
       anonSetExpr(@[strExpr("destination-unreachable"), strExpr("packet-too-big"),
-        strExpr("time-exceeded"), strExpr("parameter-problem"),
-        strExpr("mld-listener-query"), strExpr("mld-listener-report"),
-        strExpr("nd-router-solicit"), strExpr("nd-router-advert"),
-        strExpr("nd-neighbor-solicit"), strExpr("nd-neighbor-advert")])),
+        strExpr("time-exceeded"), strExpr("parameter-problem")])),
     acceptStmt()])
+  # Rate-limit echo-request (ping6)
+  cmds.add addRule(fam, tn, "icmp_v6", @[
+    matchStmt(opEq, payloadExpr("icmpv6", "type"), strExpr("echo-request")),
+    limitStmt(10, "second", burst = 5),
+    acceptStmt()])
+  # Drop other ICMPv6
+  cmds.add addRule(fam, tn, "icmp_v6", @[dropStmt()])
 
   # rpfilter
   if state.laundry.rpfilter:
@@ -274,12 +291,23 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
 
   # TCP strict
   if state.laundry.tcpStrict:
+    cmds.add addChain(fam, tn, "tcp_strict")
     let allFlagsList = listExpr(@[strExpr("fin"), strExpr("syn"), strExpr("rst"), strExpr("psh"), strExpr("ack"), strExpr("urg")])
-    cmds.add addRule(fam, tn, "input", @[matchStmt(opNot, payloadExpr("tcp", "flags"), allFlagsList), dropStmt()], "tcp-strict: null flags")
+    cmds.add addRule(fam, tn, "tcp_strict", @[matchStmt(opNot, payloadExpr("tcp", "flags"), allFlagsList), dropStmt()], "tcp-strict: null flags")
     let finSyn = binOpExpr("|", strExpr("fin"), strExpr("syn"))
-    cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, binOpExpr("&", payloadExpr("tcp", "flags"), finSyn), finSyn), dropStmt()], "tcp-strict: fin+syn")
+    cmds.add addRule(fam, tn, "tcp_strict", @[matchStmt(opEq, binOpExpr("&", payloadExpr("tcp", "flags"), finSyn), finSyn), dropStmt()], "tcp-strict: fin+syn")
     let synRst = binOpExpr("|", strExpr("syn"), strExpr("rst"))
-    cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, binOpExpr("&", payloadExpr("tcp", "flags"), synRst), synRst), dropStmt()], "tcp-strict: syn+rst")
+    cmds.add addRule(fam, tn, "tcp_strict", @[matchStmt(opEq, binOpExpr("&", payloadExpr("tcp", "flags"), synRst), synRst), dropStmt()], "tcp-strict: syn+rst")
+    # XMAS tree: FIN+PSH+URG
+    let finPshUrg = binOpExpr("|", strExpr("fin"), binOpExpr("|", strExpr("psh"), strExpr("urg")))
+    cmds.add addRule(fam, tn, "tcp_strict", @[matchStmt(opEq, binOpExpr("&", payloadExpr("tcp", "flags"), finPshUrg), finPshUrg), dropStmt()], "tcp-strict: xmas")
+    # New connection must have SYN only
+    let synOnly = binOpExpr("|", strExpr("fin"), binOpExpr("|", strExpr("syn"), binOpExpr("|", strExpr("rst"), strExpr("ack"))))
+    cmds.add addRule(fam, tn, "tcp_strict", @[
+      matchStmt(opNeq, binOpExpr("&", payloadExpr("tcp", "flags"), synOnly), strExpr("syn")),
+      matchStmt(opEq, ctExpr("state"), strExpr("new")),
+      dropStmt()], "tcp-strict: new non-syn")
+    cmds.add addRule(fam, tn, "input", @[jumpStmt("tcp_strict")])
 
   cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v4")])
   cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v6")])
@@ -293,6 +321,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, ctExpr("state"), anonSetExpr(@[strExpr("established"), strExpr("related")])), acceptStmt()])
   cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
   cmds.add addRule(fam, tn, "forward", @[jumpStmt("anti_smurf")])
+  if state.laundry.tcpStrict:
+    cmds.add addRule(fam, tn, "forward", @[jumpStmt("tcp_strict")])
   if state.laundry.broadcastDrop:
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("broadcast")), dropStmt()])
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("multicast")), dropStmt()])

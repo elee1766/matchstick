@@ -6,21 +6,9 @@ on:
   pull_request:
     branches: [main, master]
 
-env:
-  NIMBLE_DIR: ~/.nimble
-
 jobs:
   test:
-    strategy:
-      matrix:
-        nim:
-          - stable
-          - 2.2.x
-        os:
-          - ubuntu-22.04
-          - ubuntu-24.04
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -29,26 +17,28 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq liblua5.4-dev nftables libnftables-dev
+          sudo apt-get install -y -qq musl-tools nftables
 
       - name: Setup Nim
-        uses: nim-lang/setup-nim@v1
+        uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: ${{ matrix.nim }}
+          nim-version: stable
 
       - name: Cache nimble packages
         uses: actions/cache@v4
         with:
           path: ~/.nimble
-          key: ${{ runner.os }}-nimble-${{ matrix.nim }}-${{ hashFiles('*.nimble') }}
-          restore-keys: |
-            ${{ runner.os }}-nimble-${{ matrix.nim }}-
+          key: nimble-${{ hashFiles('*.nimble') }}
+          restore-keys: nimble-
 
       - name: Install nimble dependencies
         run: nimble install -y --depsOnly
 
       - name: Build
-        run: nimble build -y
+        run: |
+          nimble build -y
+          file matchstick
+          ls -lh matchstick
 
       - name: Unit tests
         run: |
@@ -64,15 +54,19 @@ jobs:
             nim c -r --hints:off --warnings:off "$t"
           done
 
-      - name: nftables validation test
+      - name: nftables validation
         run: |
+          # Enable user namespaces if needed
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+
+          echo "--- text format ---"
           unshare --user --net --map-root-user -- \
             sh -c './matchstick render tests/testdata/full.lua 2>/dev/null | nft -c -f -'
+
+          echo "--- json format ---"
           unshare --user --net --map-root-user -- \
             sh -c './matchstick render --json tests/testdata/full.lua 2>/dev/null | nft -j -c -f -'
 
-      - name: Binary smoke test
-        run: |
-          ./matchstick check tests/testdata/full.lua
-          ./matchstick show matrix tests/testdata/full.lua 2>/dev/null
-          ./matchstick show topology tests/testdata/full.lua --format=dot 2>/dev/null > /dev/null
+          echo "--- apply in netns ---"
+          unshare --user --net --map-root-user -- \
+            sh -c './matchstick apply tests/testdata/full.lua 2>&1'

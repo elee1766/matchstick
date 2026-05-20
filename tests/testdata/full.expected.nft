@@ -70,10 +70,14 @@ table inet matchstick {
 
     chain icmp_v4 {
         icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10/second burst 5 packets accept
     }
 
     chain icmp_v6 {
-        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, mld-listener-query, mld-listener-report, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10/second burst 5 packets accept
+        drop
     }
 
     chain rpfilter {
@@ -94,9 +98,7 @@ table inet matchstick {
         jump anti_smurf
         iifname eth0 udp sport 67 udp dport 68 accept
         iifname eth1 udp sport 68 udp dport 67 accept
-        tcp flags ! fin,syn,rst,psh,ack,urg drop comment "tcp-strict: null flags"
-        tcp flags & (fin|syn) fin|syn drop comment "tcp-strict: fin+syn"
-        tcp flags & (syn|rst) syn|rst drop comment "tcp-strict: syn+rst"
+        jump tcp_strict
         jump icmp_v4
         jump icmp_v6
         iifname vmap @input_zones
@@ -105,11 +107,20 @@ table inet matchstick {
         drop
     }
 
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment "tcp-strict: null flags"
+        tcp flags & (fin|syn) fin|syn drop comment "tcp-strict: fin+syn"
+        tcp flags & (syn|rst) syn|rst drop comment "tcp-strict: syn+rst"
+        tcp flags & (fin|psh|urg) fin|psh|urg drop comment "tcp-strict: xmas"
+        tcp flags & (fin|syn|rst|ack) != syn ct state new drop comment "tcp-strict: new non-syn"
+    }
+
     chain forward {
         type filter hook forward priority filter + 5; policy drop;
         ct state { established, related } accept
         ct state invalid drop
         jump anti_smurf
+        jump tcp_strict
         fib daddr type broadcast drop
         fib daddr type multicast drop
         iifname . oifname vmap @forward_zones

@@ -1,55 +1,10 @@
-## nftables_ffi.nim - libnftables C FFI bindings.
+## nftables_ffi.nim - nftables interaction via the `nft` CLI.
 ##
-## Dynamically links against libnftables.so for in-process validation
-## and application of nftables rulesets.
-##
-## libnftables is only needed for `apply` and `check --validate` commands.
-## The render/show commands work without it.
+## Shells out to the `nft` binary for validation and application.
+## No library dependency -- just needs `nft` in PATH for apply/diff commands.
+## render/check/show commands work without nft installed.
 
-const
-  NFT_CTX_OUTPUT_REVERSEDNS* = (1 shl 0).cuint
-  NFT_CTX_OUTPUT_SERVICE*    = (1 shl 1).cuint
-  NFT_CTX_OUTPUT_STATELESS*  = (1 shl 2).cuint
-  NFT_CTX_OUTPUT_HANDLE*     = (1 shl 3).cuint
-  NFT_CTX_OUTPUT_JSON*       = (1 shl 4).cuint
-  NFT_CTX_OUTPUT_ECHO*       = (1 shl 5).cuint
-  NFT_CTX_OUTPUT_GUID*       = (1 shl 6).cuint
-  NFT_CTX_OUTPUT_NUMERIC_PROTO* = (1 shl 7).cuint
-  NFT_CTX_OUTPUT_NUMERIC_PRIO* = (1 shl 8).cuint
-  NFT_CTX_OUTPUT_NUMERIC_SYMBOL* = (1 shl 9).cuint
-  NFT_CTX_OUTPUT_NUMERIC_TIME*  = (1 shl 10).cuint
-  NFT_CTX_OUTPUT_NUMERIC_ALL*   = (NFT_CTX_OUTPUT_NUMERIC_PROTO.int or
-                                   NFT_CTX_OUTPUT_NUMERIC_PRIO.int or
-                                   NFT_CTX_OUTPUT_NUMERIC_SYMBOL.int or
-                                   NFT_CTX_OUTPUT_NUMERIC_TIME.int).cuint
-  NFT_CTX_OUTPUT_TERSE*      = (1 shl 11).cuint
-
-  NFT_CTX_INPUT_NO_DNS*   = (1 shl 0).cuint
-  NFT_CTX_INPUT_JSON*     = (1 shl 1).cuint
-
-# Link against libnftables dynamically
-{.passl: "-lnftables".}
-
-type
-  NftCtx* = pointer  ## Opaque nft_ctx*
-
-proc nft_ctx_new*(flags: cuint): NftCtx {.importc, cdecl.}
-proc nft_ctx_free*(ctx: NftCtx) {.importc, cdecl.}
-proc nft_ctx_set_dry_run*(ctx: NftCtx, dry_run: bool) {.importc, cdecl.}
-proc nft_ctx_output_get_flags*(ctx: NftCtx): cuint {.importc, cdecl.}
-proc nft_ctx_output_set_flags*(ctx: NftCtx, flags: cuint) {.importc, cdecl.}
-proc nft_ctx_input_get_flags*(ctx: NftCtx): cuint {.importc, cdecl.}
-proc nft_ctx_input_set_flags*(ctx: NftCtx, flags: cuint) {.importc, cdecl.}
-proc nft_ctx_buffer_output*(ctx: NftCtx): cint {.importc, cdecl.}
-proc nft_ctx_buffer_error*(ctx: NftCtx): cint {.importc, cdecl.}
-proc nft_ctx_get_output_buffer*(ctx: NftCtx): cstring {.importc, cdecl.}
-proc nft_ctx_get_error_buffer*(ctx: NftCtx): cstring {.importc, cdecl.}
-proc nft_run_cmd_from_buffer*(ctx: NftCtx, buf: cstring): cint {.importc, cdecl.}
-proc nft_run_cmd_from_filename*(ctx: NftCtx, filename: cstring): cint {.importc, cdecl.}
-
-# ---------------------------------------------------------------------------
-# High-level Nim wrappers
-# ---------------------------------------------------------------------------
+import std/[osproc, strutils]
 
 type
   NftResult* = object
@@ -57,31 +12,52 @@ type
     output*: string
     error*: string
 
-proc runNft(cmd: string, dryRun = false, jsonInput = false): NftResult =
-  ## Run an nftables command via libnftables, returning output and errors.
-  let ctx = nft_ctx_new(0)
-  if ctx == nil:
-    return NftResult(success: false, error: "failed to create nft context")
-  defer: nft_ctx_free(ctx)
+proc findNft(): string =
+  ## Find the nft binary. Returns empty string if not found.
+  let (output, exitCode) = execCmdEx("which nft 2>/dev/null")
+  if exitCode == 0:
+    return output.strip()
+  # Common paths
+  for path in ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]:
+    let (_, ec) = execCmdEx("test -x " & path)
+    if ec == 0: return path
+  return ""
 
-  if dryRun: nft_ctx_set_dry_run(ctx, true)
-  if jsonInput: nft_ctx_input_set_flags(ctx, NFT_CTX_INPUT_JSON)
-  discard nft_ctx_buffer_output(ctx)
-  discard nft_ctx_buffer_error(ctx)
-
-  let rc = nft_run_cmd_from_buffer(ctx, cmd.cstring)
-  result.success = (rc == 0)
-  result.output = $nft_ctx_get_output_buffer(ctx)
-  result.error = $nft_ctx_get_error_buffer(ctx)
+proc ensureNft(): string =
+  let nft = findNft()
+  if nft == "":
+    raise newException(CatchableError,
+      "nft binary not found. Install nftables (e.g., apt install nftables) " &
+      "or use 'matchstick render' to generate rules without applying them.")
+  return nft
 
 proc nftValidate*(ruleset: string): NftResult =
-  ## Validate an nftables ruleset (text format) via dry-run.
-  runNft(ruleset, dryRun = true)
+  ## Validate a text ruleset via `nft -c -f -` (dry-run, no root needed in netns).
+  let nft = ensureNft()
+  let (output, exitCode) = execCmdEx("echo " & quoteShell(ruleset) & " | " & nft & " -c -f - 2>&1")
+  result.success = (exitCode == 0)
+  if exitCode == 0:
+    result.output = output
+  else:
+    result.error = output
 
 proc nftApply*(ruleset: string): NftResult =
-  ## Apply an nftables ruleset (text format) to the kernel. Requires root.
-  runNft(ruleset)
+  ## Apply a text ruleset via `nft -f -`. Requires root.
+  let nft = ensureNft()
+  let (output, exitCode) = execCmdEx("echo " & quoteShell(ruleset) & " | " & nft & " -f - 2>&1")
+  result.success = (exitCode == 0)
+  if exitCode == 0:
+    result.output = output
+  else:
+    result.error = output
 
 proc nftListTable*(family, name: string): NftResult =
-  ## List a specific nftables table.
-  runNft("list table " & family & " " & name)
+  ## List a specific table from the running ruleset.
+  let nft = ensureNft()
+  let cmd = nft & " list table " & family & " " & name & " 2>&1"
+  let (output, exitCode) = execCmdEx(cmd)
+  result.success = (exitCode == 0)
+  if exitCode == 0:
+    result.output = output
+  else:
+    result.error = output

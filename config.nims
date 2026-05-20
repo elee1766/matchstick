@@ -1,11 +1,14 @@
 import std/os
 
 # Lua 5.4 is vendored and compiled from C sources.
-# Tell the C compiler where to find Lua headers.
 switch("passC", "-I" & (thisDir() / "vendor" / "lua54" / "src"))
-
-# Build Lua as a POSIX library (enables os/io/loadlib)
 switch("passC", "-DLUA_USE_POSIX")
-
-# Link math library (required by Lua)
 switch("passL", "-lm")
+
+# Static build with musl for portable binary (works on glibc + musl systems)
+let muslGcc = findExe("musl-gcc")
+if muslGcc != "":
+  switch("gcc.exe", muslGcc)
+  switch("gcc.linkerexe", muslGcc)
+  switch("passL", "-static")
+

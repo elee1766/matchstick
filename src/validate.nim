@@ -136,6 +136,68 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
         line: rule.line)
 
   # ------------------------------------------------------------------
+  # Check: DNAT rules should have corresponding forward ACCEPT rules
+  # ------------------------------------------------------------------
+  for dnat in state.dnatRules:
+    if dnat.iface == nil: continue
+    # Find the destination zone (zone containing the dest host)
+    var destZone: Zone
+    for name, host in state.hosts:
+      if host.addr4 == dnat.dest:
+        destZone = host.zone
+        break
+    if destZone == nil:
+      # dest is a raw IP not mapped to a host -- can't verify forward rules
+      continue
+    # Check if there's a forward rule or accept policy from iface zone to dest zone
+    var hasForward = false
+    for pol in state.policies:
+      if pol.src.zone == dnat.iface and pol.dst.zone == destZone and pol.action == actAccept:
+        hasForward = true
+        break
+    if not hasForward:
+      for rule in state.rules:
+        if rule.src.zone == dnat.iface and rule.dst.zone == destZone and rule.action == actAccept:
+          hasForward = true
+          break
+    if not hasForward:
+      msgs.add ValidationMsg(severity: svWarning,
+        msg: "fw:dnat to " & dnat.dest & " via zone \"" & dnat.iface.name &
+             "\" has no corresponding forward ACCEPT rule/policy to zone \"" &
+             destZone.name & "\"",
+        line: dnat.line)
+
+  # ------------------------------------------------------------------
+  # Check: zone and interface name validity (Linux naming rules)
+  # ------------------------------------------------------------------
+  # Linux interface names: max 15 chars, alphanumeric + hyphen + underscore + dot
+  # nftables chain names: alphanumeric + underscore + hyphen + dot
+  proc isValidIdentifier(s: string, maxLen: int): bool =
+    if s.len == 0 or s.len > maxLen: return false
+    for c in s:
+      if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '.'}:
+        return false
+    return true
+
+  for name, zone in state.zones:
+    if not isValidIdentifier(name, 64):
+      msgs.add ValidationMsg(severity: svError,
+        msg: "zone name \"" & name & "\" is invalid (must be 1-64 chars, alphanumeric/hyphen/underscore/dot)",
+        line: zone.line)
+    for iface in zone.interfaces:
+      if not isValidIdentifier(iface, 15):
+        msgs.add ValidationMsg(severity: svError,
+          msg: "interface \"" & iface & "\" in zone \"" & name &
+               "\" is invalid (must be 1-15 chars, alphanumeric/hyphen/underscore/dot)",
+          line: zone.line)
+
+  for name, host in state.hosts:
+    if not isValidIdentifier(name, 64):
+      msgs.add ValidationMsg(severity: svError,
+        msg: "host name \"" & name & "\" is invalid (must be 1-64 chars, alphanumeric/hyphen/underscore/dot)",
+        line: host.line)
+
+  # ------------------------------------------------------------------
   # Shadow detection
   # ------------------------------------------------------------------
 

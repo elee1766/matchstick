@@ -1,13 +1,54 @@
 ## emit_json.nim - nftables JSON serialization via jsony.
 ##
-## Expr and Stmt have custom dumpHooks (key-based variant dispatch).
-## Top-level records (NftTable, NftChain, etc.) also need hooks because
-## jsony's default uses the discriminator field for variants.
-## NftCmd and NftRuleset use hooks to produce the nftables command format.
+## Custom dumpHooks for Expr/Stmt (key-based variant dispatch)
+## and top-level records (field renames like setType→type).
+##
+## Uses auto-comma helpers: jsonObj/jsonFieldVal handle comma insertion
+## automatically. No manual comma tracking needed.
 
 import std/[strutils, options, json]
 import jsony
 import ./nft_ir
+
+# ---------------------------------------------------------------------------
+# Auto-comma JSON builder helpers
+# ---------------------------------------------------------------------------
+
+var jFieldCount {.threadvar.}: int
+
+template jsonObj(s: var string, body: untyped) =
+  s.add '{'
+  let saved = jFieldCount
+  jFieldCount = 0
+  body
+  jFieldCount = saved
+  s.add '}'
+
+template jsonArr(s: var string, body: untyped) =
+  s.add '['
+  body
+  s.add ']'
+
+template jsonField(s: var string, key: string, body: untyped) =
+  ## Write "key": <body>  with auto comma before if not first field
+  if jFieldCount > 0: s.add ','
+  s.dumpHook(key)
+  s.add ':'
+  body
+  inc jFieldCount
+
+template jsonFieldVal(s: var string, key: string, val: untyped) =
+  ## Write "key": val  with auto comma
+  if jFieldCount > 0: s.add ','
+  s.dumpHook(key)
+  s.add ':'
+  s.dumpHook(val)
+  inc jFieldCount
+
+template jsonItems[T](s: var string, items: openArray[T]) =
+  for i, item in items:
+    if i > 0: s.add ','
+    s.dumpHook(item)
 
 # ---------------------------------------------------------------------------
 # Expr dumpHook
@@ -24,102 +65,98 @@ proc dumpHook*(s: var string, e: Expr) =
       if parts.len == 2:
         try:
           let plen = parseInt(parts[1])
-          s.add "{\"prefix\":{\"addr\":"
-          s.dumpHook(parts[0])
-          s.add ",\"len\":" & $plen & "}}"
+          s.jsonObj:
+            s.jsonField("prefix"):
+              s.jsonObj:
+                s.jsonFieldVal("addr", parts[0])
+                s.jsonFieldVal("len", plen)
           return
         except ValueError: discard
     s.dumpHook(e.strVal)
   of ekInt:       s.dumpHook(e.intVal)
   of ekBool:      s.dumpHook(e.boolVal)
   of ekList:
-    s.add "["
-    for i, el in e.listElems:
-      if i > 0: s.add ","
-      s.dumpHook(el)
-    s.add "]"
+    s.jsonArr:
+      s.jsonItems(e.listElems)
   of ekPrefix:
-    s.add "{\"prefix\":{\"addr\":"
-    s.dumpHook(e.prefixAddr)
-    s.add ",\"len\":" & $e.prefixLen & "}}"
+    s.jsonObj:
+      s.jsonField("prefix"):
+        s.jsonObj:
+          s.jsonFieldVal("addr", e.prefixAddr)
+          s.jsonFieldVal("len", e.prefixLen)
   of ekRange:
-    s.add "{\"range\":["
-    s.dumpHook(e.rangeMin)
-    s.add ","
-    s.dumpHook(e.rangeMax)
-    s.add "]}"
+    s.jsonObj:
+      s.jsonField("range"):
+        s.jsonArr:
+          s.dumpHook(e.rangeMin)
+          s.add ','
+          s.dumpHook(e.rangeMax)
   of ekConcat:
-    s.add "{\"concat\":["
-    for i, el in e.concatExprs:
-      if i > 0: s.add ","
-      s.dumpHook(el)
-    s.add "]}"
+    s.jsonObj:
+      s.jsonField("concat"):
+        s.jsonArr: s.jsonItems(e.concatExprs)
   of ekPayload:
-    s.add "{\"payload\":{\"protocol\":"
-    s.dumpHook(e.payloadProto)
-    s.add ",\"field\":"
-    s.dumpHook(e.payloadField)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("payload"):
+        s.jsonObj:
+          s.jsonFieldVal("protocol", e.payloadProto)
+          s.jsonFieldVal("field", e.payloadField)
   of ekMeta:
-    s.add "{\"meta\":{\"key\":"
-    s.dumpHook(e.metaKey)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("meta"):
+        s.jsonObj:
+          s.jsonFieldVal("key", e.metaKey)
   of ekCt:
-    s.add "{\"ct\":{\"key\":"
-    s.dumpHook(e.ctKey)
-    if e.ctDir != "": s.add ",\"dir\":"; s.dumpHook(e.ctDir)
-    if e.ctFamily != "": s.add ",\"family\":"; s.dumpHook(e.ctFamily)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("ct"):
+        s.jsonObj:
+          s.jsonFieldVal("key", e.ctKey)
+          if e.ctDir != "": s.jsonFieldVal("dir", e.ctDir)
+          if e.ctFamily != "": s.jsonFieldVal("family", e.ctFamily)
   of ekFib:
-    s.add "{\"fib\":{\"result\":"
-    s.dumpHook(e.fibResult)
-    s.add ",\"flags\":["
-    for i, f in e.fibFlags:
-      if i > 0: s.add ","
-      s.dumpHook(f)
-    s.add "]}}"
-  of ekSet:     s.dumpHook("@" & e.setName)
+    s.jsonObj:
+      s.jsonField("fib"):
+        s.jsonObj:
+          s.jsonFieldVal("result", e.fibResult)
+          s.jsonField("flags"):
+            s.jsonArr: s.jsonItems(e.fibFlags)
+  of ekSet:       s.dumpHook("@" & e.setName)
   of ekMap:
-    s.add "{\"map\":{\"key\":"
-    s.dumpHook(e.mapKey)
-    s.add ",\"data\":"
-    s.dumpHook("@" & e.mapData)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("map"):
+        s.jsonObj:
+          s.jsonFieldVal("key", e.mapKey)
+          s.jsonFieldVal("data", "@" & e.mapData)
   of ekElem:
     if e.elemTimeout > 0:
-      s.add "{\"elem\":{\"val\":"
-      s.dumpHook(e.elemVal)
-      s.add ",\"timeout\":" & $e.elemTimeout & "}}"
+      s.jsonObj:
+        s.jsonField("elem"):
+          s.jsonObj:
+            s.jsonFieldVal("val", e.elemVal)
+            s.jsonFieldVal("timeout", e.elemTimeout)
     else:
       s.dumpHook(e.elemVal)
   of ekVerdict:
-    case e.verdictKind
-    of "accept": s.add "{\"accept\":null}"
-    of "drop":   s.add "{\"drop\":null}"
-    of "return": s.add "{\"return\":null}"
-    of "jump":
-      s.add "{\"jump\":{\"target\":"
-      s.dumpHook(e.verdictTarget)
-      s.add "}}"
-    of "goto":
-      s.add "{\"goto\":{\"target\":"
-      s.dumpHook(e.verdictTarget)
-      s.add "}}"
-    else: s.add "{"; s.dumpHook(e.verdictKind); s.add ":null}"
+    s.jsonObj:
+      case e.verdictKind
+      of "accept", "drop", "return":
+        s.jsonField(e.verdictKind): s.add "null"
+      of "jump", "goto":
+        s.jsonField(e.verdictKind):
+          s.jsonObj: s.jsonFieldVal("target", e.verdictTarget)
+      else:
+        s.jsonField(e.verdictKind): s.add "null"
   of ekBinOp:
-    s.add "{"
-    s.dumpHook(e.binOp)
-    s.add ":["
-    s.dumpHook(e.binLeft)
-    s.add ","
-    s.dumpHook(e.binRight)
-    s.add "]}"
+    s.jsonObj:
+      s.jsonField(e.binOp):
+        s.jsonArr:
+          s.dumpHook(e.binLeft)
+          s.add ','
+          s.dumpHook(e.binRight)
   of ekAnonymousSet:
-    s.add "{\"set\":["
-    for i, el in e.anonSetElems:
-      if i > 0: s.add ","
-      s.dumpHook(el)
-    s.add "]}"
+    s.jsonObj:
+      s.jsonField("set"):
+        s.jsonArr: s.jsonItems(e.anonSetElems)
 
 # ---------------------------------------------------------------------------
 # Stmt dumpHook
@@ -131,204 +168,215 @@ proc dumpHook*(s: var string, st: Stmt) =
     return
   case st.kind
   of skMatch:
-    s.add "{\"match\":{\"op\":"
-    s.dumpHook($st.matchOp)
-    s.add ",\"left\":"
-    s.dumpHook(st.matchLeft)
-    s.add ",\"right\":"
-    s.dumpHook(st.matchRight)
-    s.add "}}"
-  of skAccept: s.add "{\"accept\":null}"
-  of skDrop:   s.add "{\"drop\":null}"
-  of skReturn: s.add "{\"return\":null}"
+    s.jsonObj:
+      s.jsonField("match"):
+        s.jsonObj:
+          s.jsonFieldVal("op", $st.matchOp)
+          s.jsonFieldVal("left", st.matchLeft)
+          s.jsonFieldVal("right", st.matchRight)
+  of skAccept:
+    s.jsonObj:
+      s.jsonField("accept"): s.add "null"
+  of skDrop:
+    s.jsonObj:
+      s.jsonField("drop"): s.add "null"
+  of skReturn:
+    s.jsonObj:
+      s.jsonField("return"): s.add "null"
   of skReject:
-    s.add "{\"reject\":{"
-    var first = true
-    if st.rejectType != "":
-      s.add "\"type\":"; s.dumpHook(st.rejectType); first = false
-    if st.rejectExpr != "":
-      if not first: s.add ","
-      s.add "\"expr\":"; s.dumpHook(st.rejectExpr)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("reject"):
+        s.jsonObj:
+          if st.rejectType != "": s.jsonFieldVal("type", st.rejectType)
+          if st.rejectExpr != "": s.jsonFieldVal("expr", st.rejectExpr)
   of skJump:
-    s.add "{\"jump\":{\"target\":"; s.dumpHook(st.jumpTarget); s.add "}}"
+    s.jsonObj:
+      s.jsonField("jump"):
+        s.jsonObj: s.jsonFieldVal("target", st.jumpTarget)
   of skGoto:
-    s.add "{\"goto\":{\"target\":"; s.dumpHook(st.gotoTarget); s.add "}}"
+    s.jsonObj:
+      s.jsonField("goto"):
+        s.jsonObj: s.jsonFieldVal("target", st.gotoTarget)
   of skCounter:
-    if st.counterName != "":
-      s.add "{\"counter\":"; s.dumpHook(st.counterName); s.add "}"
-    else:
-      s.add "{\"counter\":{\"packets\":0,\"bytes\":0}}"
+    s.jsonObj:
+      if st.counterName != "":
+        s.jsonFieldVal("counter", st.counterName)
+      else:
+        s.jsonField("counter"):
+          s.jsonObj:
+            s.jsonFieldVal("packets", 0.int)
+            s.jsonFieldVal("bytes", 0.int)
   of skLog:
-    s.add "{\"log\":{"
-    var first = true
-    if st.logPrefix != "":
-      s.add "\"prefix\":"; s.dumpHook(st.logPrefix); first = false
-    if st.logLevel != "":
-      if not first: s.add ","
-      s.add "\"level\":"; s.dumpHook(st.logLevel); first = false
-    if st.logFlags.len > 0:
-      if not first: s.add ","
-      s.add "\"flags\":[";
-      for i, f in st.logFlags: (if i > 0: s.add ","); s.dumpHook(f)
-      s.add "]"
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("log"):
+        s.jsonObj:
+          if st.logPrefix != "": s.jsonFieldVal("prefix", st.logPrefix)
+          if st.logLevel != "": s.jsonFieldVal("level", st.logLevel)
+          if st.logFlags.len > 0:
+            s.jsonField("flags"):
+              s.jsonArr: s.jsonItems(st.logFlags)
   of skLimit:
-    s.add "{\"limit\":{\"rate\":" & $st.limitRate & ",\"per\":"
-    s.dumpHook(st.limitPer)
-    if st.limitBurst > 0: s.add ",\"burst\":" & $st.limitBurst
-    if st.limitInv: s.add ",\"inv\":true"
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("limit"):
+        s.jsonObj:
+          s.jsonFieldVal("rate", st.limitRate)
+          s.jsonFieldVal("per", st.limitPer)
+          if st.limitBurst > 0: s.jsonFieldVal("burst", st.limitBurst)
+          if st.limitInv: s.jsonFieldVal("inv", true)
   of skDnat:
-    s.add "{\"dnat\":{\"addr\":"; s.dumpHook(st.dnatAddr)
-    s.add ",\"family\":"; s.dumpHook(st.dnatFamily)
-    if st.dnatPort > 0: s.add ",\"port\":" & $st.dnatPort
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("dnat"):
+        s.jsonObj:
+          s.jsonFieldVal("addr", st.dnatAddr)
+          s.jsonFieldVal("family", st.dnatFamily)
+          if st.dnatPort > 0: s.jsonFieldVal("port", st.dnatPort)
   of skSnat:
-    s.add "{\"snat\":{\"addr\":"; s.dumpHook(st.snatAddr)
-    s.add ",\"family\":"; s.dumpHook(st.snatFamily)
-    if st.snatPort > 0: s.add ",\"port\":" & $st.snatPort
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("snat"):
+        s.jsonObj:
+          s.jsonFieldVal("addr", st.snatAddr)
+          s.jsonFieldVal("family", st.snatFamily)
+          if st.snatPort > 0: s.jsonFieldVal("port", st.snatPort)
   of skMasquerade:
-    if st.masqPort > 0: s.add "{\"masquerade\":{\"port\":" & $st.masqPort & "}}"
-    else: s.add "{\"masquerade\":null}"
+    s.jsonObj:
+      if st.masqPort > 0:
+        s.jsonField("masquerade"):
+          s.jsonObj: s.jsonFieldVal("port", st.masqPort)
+      else:
+        s.jsonField("masquerade"): s.add "null"
   of skVmap:
-    s.add "{\"vmap\":{\"key\":"; s.dumpHook(st.vmapKey)
-    s.add ",\"data\":"; s.dumpHook(st.vmapData)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("vmap"):
+        s.jsonObj:
+          s.jsonFieldVal("key", st.vmapKey)
+          s.jsonFieldVal("data", st.vmapData)
   of skMangle:
-    s.add "{\"mangle\":{\"key\":"; s.dumpHook(st.mangleKey)
-    s.add ",\"value\":"; s.dumpHook(st.mangleValue)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("mangle"):
+        s.jsonObj:
+          s.jsonFieldVal("key", st.mangleKey)
+          s.jsonFieldVal("value", st.mangleValue)
   of skUpdate:
-    s.add "{\"set\":{\"op\":\"update\",\"elem\":"
-    s.dumpHook(st.updateKey)
-    s.add ",\"set\":"; s.dumpHook("@" & st.updateSet)
-    s.add ",\"stmt\":[";
-    for i, sub in st.updateStmts: (if i > 0: s.add ","); s.dumpHook(sub)
-    s.add "]}}"
+    s.jsonObj:
+      s.jsonField("set"):
+        s.jsonObj:
+          s.jsonFieldVal("op", "update")
+          s.jsonFieldVal("elem", st.updateKey)
+          s.jsonFieldVal("set", "@" & st.updateSet)
+          s.jsonField("stmt"):
+            s.jsonArr: s.jsonItems(st.updateStmts)
 
 # ---------------------------------------------------------------------------
-# NftMapElem dumpHook -- [key, value] pair
+# NftMapElem dumpHook
 # ---------------------------------------------------------------------------
 
 proc dumpHook*(s: var string, e: NftMapElem) =
-  s.add "["
-  s.dumpHook(e.key)
-  s.add ","
-  s.dumpHook(e.value)
-  s.add "]"
+  s.jsonArr:
+    s.dumpHook(e.key)
+    s.add ','
+    s.dumpHook(e.value)
 
 # ---------------------------------------------------------------------------
-# Top-level object dumpHooks -- needed because of field renames
-# (setType→type, chainType→type, keyType→type, mapType→map)
+# Top-level record dumpHooks
 # ---------------------------------------------------------------------------
 
 proc dumpHook*(s: var string, t: NftTable) =
-  s.add "{\"family\":"; s.dumpHook(t.family)
-  s.add ",\"name\":"; s.dumpHook(t.name)
-  s.add "}"
+  s.jsonObj:
+    s.jsonFieldVal("family", t.family)
+    s.jsonFieldVal("name", t.name)
 
 proc dumpHook*(s: var string, c: NftChain) =
-  s.add "{\"family\":"; s.dumpHook(c.family)
-  s.add ",\"table\":"; s.dumpHook(c.table)
-  s.add ",\"name\":"; s.dumpHook(c.name)
-  if c.chainType.isSome:
-    s.add ",\"type\":"; s.dumpHook(c.chainType.get)
-  if c.hook.isSome:
-    s.add ",\"hook\":"; s.dumpHook(c.hook.get)
-  if c.prio.isSome:
-    s.add ",\"prio\":" & $c.prio.get
-  if c.policy.isSome:
-    s.add ",\"policy\":"; s.dumpHook(c.policy.get)
-  s.add "}"
+  s.jsonObj:
+    s.jsonFieldVal("family", c.family)
+    s.jsonFieldVal("table", c.table)
+    s.jsonFieldVal("name", c.name)
+    if c.chainType.isSome: s.jsonFieldVal("type", c.chainType.get)
+    if c.hook.isSome: s.jsonFieldVal("hook", c.hook.get)
+    if c.prio.isSome: s.jsonFieldVal("prio", c.prio.get)
+    if c.policy.isSome: s.jsonFieldVal("policy", c.policy.get)
 
 proc dumpHook*(s: var string, r: NftRule) =
-  s.add "{\"family\":"; s.dumpHook(r.family)
-  s.add ",\"table\":"; s.dumpHook(r.table)
-  s.add ",\"chain\":"; s.dumpHook(r.chain)
-  s.add ",\"expr\":["
-  for i, e in r.expr:
-    if i > 0: s.add ","
-    s.dumpHook(e)
-  s.add "]"
-  if r.comment.isSome:
-    s.add ",\"comment\":"; s.dumpHook(r.comment.get)
-  s.add "}"
+  s.jsonObj:
+    s.jsonFieldVal("family", r.family)
+    s.jsonFieldVal("table", r.table)
+    s.jsonFieldVal("chain", r.chain)
+    s.jsonField("expr"):
+      s.jsonArr: s.jsonItems(r.expr)
+    if r.comment.isSome: s.jsonFieldVal("comment", r.comment.get)
 
 proc dumpHook*(s: var string, st: NftSet) =
-  s.add "{\"family\":"; s.dumpHook(st.family)
-  s.add ",\"table\":"; s.dumpHook(st.table)
-  s.add ",\"name\":"; s.dumpHook(st.name)
-  s.add ",\"type\":"; s.dumpHook(st.setType)
-  if st.flags.isSome:
-    s.add ",\"flags\":[";
-    for i, f in st.flags.get: (if i > 0: s.add ","); s.dumpHook(f)
-    s.add "]"
-  if st.size.isSome: s.add ",\"size\":" & $st.size.get
-  if st.timeout.isSome: s.add ",\"timeout\":" & $st.timeout.get
-  if st.elem.isSome:
-    s.add ",\"elem\":[";
-    for i, e in st.elem.get: (if i > 0: s.add ","); s.dumpHook(e)
-    s.add "]"
-  s.add "}"
+  s.jsonObj:
+    s.jsonFieldVal("family", st.family)
+    s.jsonFieldVal("table", st.table)
+    s.jsonFieldVal("name", st.name)
+    s.jsonFieldVal("type", st.setType)
+    if st.flags.isSome:
+      s.jsonField("flags"):
+        s.jsonArr: s.jsonItems(st.flags.get)
+    if st.size.isSome: s.jsonFieldVal("size", st.size.get)
+    if st.timeout.isSome: s.jsonFieldVal("timeout", st.timeout.get)
+    if st.elem.isSome:
+      s.jsonField("elem"):
+        s.jsonArr: s.jsonItems(st.elem.get)
 
 proc dumpHook*(s: var string, m: NftMap) =
-  s.add "{\"family\":"; s.dumpHook(m.family)
-  s.add ",\"table\":"; s.dumpHook(m.table)
-  s.add ",\"name\":"; s.dumpHook(m.name)
-  # Concat types → JSON array
-  if " . " in m.keyType:
-    s.add ",\"type\":["
-    let parts = m.keyType.split(" . ")
-    for i, p in parts: (if i > 0: s.add ","); s.dumpHook(p)
-    s.add "]"
-  else:
-    s.add ",\"type\":"; s.dumpHook(m.keyType)
-  s.add ",\"map\":"; s.dumpHook(m.mapType)
-  if m.flags.isSome:
-    s.add ",\"flags\":[";
-    for i, f in m.flags.get: (if i > 0: s.add ","); s.dumpHook(f)
-    s.add "]"
-  if m.elem.isSome:
-    s.add ",\"elem\":[";
-    for i, e in m.elem.get: (if i > 0: s.add ","); s.dumpHook(e)
-    s.add "]"
-  s.add "}"
+  s.jsonObj:
+    s.jsonFieldVal("family", m.family)
+    s.jsonFieldVal("table", m.table)
+    s.jsonFieldVal("name", m.name)
+    if " . " in m.keyType:
+      s.jsonField("type"):
+        s.jsonArr:
+          let parts = m.keyType.split(" . ")
+          s.jsonItems(parts)
+    else:
+      s.jsonFieldVal("type", m.keyType)
+    s.jsonFieldVal("map", m.mapType)
+    if m.flags.isSome:
+      s.jsonField("flags"):
+        s.jsonArr: s.jsonItems(m.flags.get)
+    if m.elem.isSome:
+      s.jsonField("elem"):
+        s.jsonArr: s.jsonItems(m.elem.get)
 
 # ---------------------------------------------------------------------------
-# NftCmd dumpHook -- produces {"add": {"table": ...}} etc.
+# NftCmd dumpHook
 # ---------------------------------------------------------------------------
 
 proc dumpHook*(s: var string, cmd: NftCmd) =
   case cmd.kind
   of nckMetainfo:
-    s.add "{\"metainfo\":{\"json_schema_version\":" & $cmd.metainfo.json_schema_version & "}}"
+    s.jsonObj:
+      s.jsonField("metainfo"):
+        s.jsonObj:
+          s.jsonFieldVal("json_schema_version", cmd.metainfo.json_schema_version)
   of nckAdd:
-    s.add "{\"add\":{"
-    case cmd.add.kind
-    of nakTable: s.add "\"table\":"; s.dumpHook(cmd.add.table)
-    of nakChain: s.add "\"chain\":"; s.dumpHook(cmd.add.chain)
-    of nakRule:  s.add "\"rule\":"; s.dumpHook(cmd.add.rule)
-    of nakSet:   s.add "\"set\":"; s.dumpHook(cmd.add.set)
-    of nakMap:   s.add "\"map\":"; s.dumpHook(cmd.add.map)
-    s.add "}}"
+    s.jsonObj:
+      s.jsonField("add"):
+        s.jsonObj:
+          case cmd.add.kind
+          of nakTable: s.jsonFieldVal("table", cmd.add.table)
+          of nakChain: s.jsonFieldVal("chain", cmd.add.chain)
+          of nakRule:  s.jsonFieldVal("rule", cmd.add.rule)
+          of nakSet:   s.jsonFieldVal("set", cmd.add.set)
+          of nakMap:   s.jsonFieldVal("map", cmd.add.map)
   of nckDelete:
-    s.add "{\"delete\":{"; s.dumpHook(cmd.deleteWhat)
-    s.add ":{\"family\":"; s.dumpHook(cmd.delete.family)
-    s.add ",\"name\":"; s.dumpHook(cmd.delete.name)
-    s.add "}}}"
+    s.jsonObj:
+      s.jsonField("delete"):
+        s.jsonObj:
+          s.jsonField(cmd.deleteWhat):
+            s.jsonObj:
+              s.jsonFieldVal("family", cmd.delete.family)
+              s.jsonFieldVal("name", cmd.delete.name)
 
 # ---------------------------------------------------------------------------
-# NftRuleset dumpHook -- {"nftables": [...]}
+# NftRuleset dumpHook
 # ---------------------------------------------------------------------------
 
 proc dumpHook*(s: var string, rs: NftRuleset) =
-  s.add "{\"nftables\":["
-  for i, cmd in rs.nftables:
-    if i > 0: s.add ","
-    s.dumpHook(cmd)
-  s.add "]}"
+  s.jsonObj:
+    s.jsonField("nftables"):
+      s.jsonArr: s.jsonItems(rs.nftables)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -337,7 +385,6 @@ proc dumpHook*(s: var string, rs: NftRuleset) =
 proc emitJson*(rs: NftRuleset, pretty: bool = true): string =
   let compact = rs.toJson()
   if pretty:
-    # Re-parse and pretty-print (small cost for config-size output)
     return parseJson(compact).pretty() & "\n"
   else:
     return compact & "\n"
