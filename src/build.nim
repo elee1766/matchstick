@@ -1,6 +1,6 @@
 ## build.nim - Transform FirewallState into NftRuleset IR.
 
-import std/[options, tables, strutils, sequtils, algorithm]
+import std/[options, tables, strutils, sequtils, algorithm, strformat]
 import ./types
 import ./nft_ir
 import ./ipaddr
@@ -11,6 +11,24 @@ import ./ipaddr
 
 proc chainName(src, dst: string): string = src & "_to_" & dst
 proc priorityVal(base, offset: int): int = base + offset
+
+proc resolvePriority(priorityStr: string, offset: int): int =
+  ## Resolve a priority string to an integer value.
+  ## Named priorities: raw=-300, mangle=-150, filter=0, security=50, srcnat=100, dstnat=-100
+  case priorityStr
+  of "raw": -300 + offset
+  of "mangle": -150 + offset
+  of "filter": 0 + offset
+  of "security": 50 + offset
+  of "srcnat": 100 + offset
+  of "dstnat": -100 + offset
+  else:
+    try: parseInt(priorityStr) + offset
+    except ValueError: 0 + offset
+
+proc customChainName(hook, chainType, priorityStr: string, idx: int): string =
+  ## Generate a unique chain name for a custom chain.
+  fmt"custom_{chainType}_{hook}_{idx}"
 
 proc actionToStmt(action: Action): Stmt =
   case action
@@ -160,6 +178,44 @@ proc analyzeZonePairs(state: FirewallState): seq[ZonePair] =
   result.sort(proc(a, b: ZonePair): int = cmp(a.src.name & a.dst.name, b.src.name & b.dst.name))
 
 # ---------------------------------------------------------------------------
+# Exception rule builder
+# ---------------------------------------------------------------------------
+
+proc buildExceptionRules(state: FirewallState, exc: ChainException): seq[seq[Stmt]] =
+  ## Build statement lists for a chain exception. Similar to buildRuleExprs but
+  ## simpler -- no zone/endpoint resolution, just service/proto/port matching.
+  let action = actionToStmt(exc.action)
+
+  if exc.service.isSome:
+    for entry in exc.service.get.entries:
+      var stmts: seq[Stmt]
+      if entry.proto == "icmp":
+        stmts.add matchStmt(opEq, payloadExpr("icmp", "type"), strExpr(entry.port))
+      elif entry.proto == "icmpv6":
+        stmts.add matchStmt(opEq, payloadExpr("icmpv6", "type"), strExpr(entry.port))
+      else:
+        stmts.add matchStmt(opEq, payloadExpr(entry.proto, "dport"), parsePortExpr(entry.port))
+      stmts.add action
+      result.add stmts
+    return
+
+  if exc.proto.len > 0:
+    let portExprs = exc.port.mapIt(parsePortExpr(it))
+    let portExpr = if portExprs.len == 1: portExprs[0]
+                   elif portExprs.len > 1: sortedAnonSetExpr(portExprs)
+                   else: nil
+    for proto in exc.proto:
+      var stmts: seq[Stmt]
+      if portExpr != nil:
+        stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExpr)
+      stmts.add action
+      result.add stmts
+    return
+
+  # Bare exception -- just the action
+  result.add @[action]
+
+# ---------------------------------------------------------------------------
 # Main build function
 # ---------------------------------------------------------------------------
 
@@ -261,19 +317,45 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   # rpfilter
   if state.laundry.rpfilter:
     cmds.add addBaseChain(fam, tn, "rpfilter", "filter", "prerouting", priorityVal(0, offset), "accept")
+    # Exception rules for rpfilter (inserted before the drop)
+    for exc in state.chainExceptions:
+      if exc.chain == "rpfilter":
+        let excRules = buildExceptionRules(state, exc)
+        for er in excRules:
+          cmds.add addRule(fam, tn, "rpfilter", er)
     cmds.add addRule(fam, tn, "rpfilter", @[
       matchStmt(opEq, fibExpr("oif", @["saddr", "mark", "iif"]), strExpr("0")), dropStmt()])
 
   # anti_smurf
   cmds.add addChain(fam, tn, "anti_smurf")
+  # Exception rules for anti_smurf (inserted before the drops)
+  for exc in state.chainExceptions:
+    if exc.chain == "anti_smurf":
+      let excRules = buildExceptionRules(state, exc)
+      for er in excRules:
+        cmds.add addRule(fam, tn, "anti_smurf", er)
   cmds.add addRule(fam, tn, "anti_smurf", @[matchStmt(opEq, fibExpr("type", @["saddr"]), strExpr("broadcast")), dropStmt()])
   cmds.add addRule(fam, tn, "anti_smurf", @[matchStmt(opEq, fibExpr("type", @["saddr"]), strExpr("multicast")), dropStmt()])
+
+  # Invalid chain (if exceptions exist, create a separate chain for extensibility)
+  let hasInvalidExceptions = state.chainExceptions.anyIt(it.chain == "invalid")
+  if hasInvalidExceptions:
+    cmds.add addChain(fam, tn, "invalid")
+    for exc in state.chainExceptions:
+      if exc.chain == "invalid":
+        let excRules = buildExceptionRules(state, exc)
+        for er in excRules:
+          cmds.add addRule(fam, tn, "invalid", er)
+    cmds.add addRule(fam, tn, "invalid", @[dropStmt()])
 
   # Input chain
   cmds.add addBaseChain(fam, tn, "input", "filter", "input", priorityVal(0, offset), inputPolicy)
   cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, metaExpr("iif"), strExpr("lo")), acceptStmt()])
   cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, ctExpr("state"), anonSetExpr(@[strExpr("established"), strExpr("related")])), acceptStmt()])
-  cmds.add addRule(fam, tn, "input", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
+  if hasInvalidExceptions:
+    cmds.add addRule(fam, tn, "input", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), jumpStmt("invalid")])
+  else:
+    cmds.add addRule(fam, tn, "input", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
   cmds.add addRule(fam, tn, "input", @[jumpStmt("anti_smurf")])
 
   # DHCP
@@ -319,7 +401,10 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   # Forward chain
   cmds.add addBaseChain(fam, tn, "forward", "filter", "forward", priorityVal(0, offset), "drop")
   cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, ctExpr("state"), anonSetExpr(@[strExpr("established"), strExpr("related")])), acceptStmt()])
-  cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
+  if hasInvalidExceptions:
+    cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), jumpStmt("invalid")])
+  else:
+    cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
   cmds.add addRule(fam, tn, "forward", @[jumpStmt("anti_smurf")])
   if state.laundry.tcpStrict:
     cmds.add addRule(fam, tn, "forward", @[jumpStmt("tcp_strict")])
@@ -426,13 +511,25 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
           stmts.add snatStmt(snat.addr4, family = family)
         cmds.add addRule(fam, natTn, "postrouting", stmts)
 
+  # Custom chains (fw:chain)
+  for i, cc in state.customChains:
+    let prio = resolvePriority(cc.priority, offset)
+    let cn = customChainName(cc.hook, cc.chainType, cc.priority, i)
+    cmds.add addBaseChain(fam, tn, cn, cc.chainType, cc.hook, prio, "accept")
+    for rawRule in cc.rawRules:
+      cmds.add addRule(fam, tn, cn, @[rawStmt(rawRule)])
+
+  # Raw nftables lines (fw:raw_nft) -- injected verbatim into the main table
+  if state.rawNft.len > 0:
+    cmds.add rawCmd(state.rawNft)
+
   # Add counters to all rules if configured
   if addCounter:
     for cmd in cmds.mitems:
       if cmd.kind == nckAdd and cmd.add.kind == nakRule:
         cmd.add.rule.expr.insert(counterStmt(), 0)
 
-  # Reorder: metainfo first, then tables, chains, sets/maps, rules
+  # Reorder: metainfo first, then tables, chains, sets/maps, raw lines, rules
   var ordered: seq[NftCmd]
   ordered.add metainfoCmd()
   for c in cmds:
@@ -443,6 +540,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     if c.kind == nckAdd and c.add.kind == nakChain: ordered.add c
   for c in cmds:
     if c.kind == nckAdd and c.add.kind in {nakSet, nakMap}: ordered.add c
+  for c in cmds:
+    if c.kind == nckRaw: ordered.add c
   for c in cmds:
     if c.kind == nckAdd and c.add.kind == nakRule: ordered.add c
 

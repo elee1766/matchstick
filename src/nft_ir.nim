@@ -87,7 +87,8 @@ type
   StmtKind* = enum
     skMatch, skAccept, skDrop, skReject, skReturn,
     skJump, skGoto, skCounter, skLog, skLimit,
-    skDnat, skSnat, skMasquerade, skVmap, skMangle, skUpdate
+    skDnat, skSnat, skMasquerade, skVmap, skMangle, skUpdate,
+    skRaw
 
   Stmt* = ref object
     case kind*: StmtKind
@@ -135,6 +136,8 @@ type
       updateSet*: string
       updateKey*: Expr
       updateStmts*: seq[Stmt]
+    of skRaw:
+      rawText*: string
 
   # =========================================================================
   # Top-level objects
@@ -156,7 +159,7 @@ type
     of chkRegular:
       discard
     of chkBase:
-      chainType*: string   ## "filter" | "nat" | "route"   (JSON field: "type")
+      `type`*: string      ## "filter" | "nat" | "route"
       hook*: string        ## "input" | "output" | "forward" | "prerouting" | "postrouting"
       prio*: int
       policy*: string      ## "accept" | "drop"
@@ -176,7 +179,7 @@ type
     family*: string
     table*: string
     name*: string
-    setType*: string             ## "ipv4_addr", "ipv6_addr", etc. (JSON field: "type")
+    `type`*: string              ## "ipv4_addr", "ipv6_addr", etc.
     case kind*: NftSetKind
     of setkPlain:
       plainElem*: seq[Expr]
@@ -194,8 +197,8 @@ type
     family*: string
     table*: string
     name*: string
-    keyType*: string             ## key type (JSON field: "type") -- may be "ifname . ifname"
-    mapType*: string             ## value type (JSON field: "map") -- "verdict" for vmaps
+    `type`*: string              ## key type -- may be "ifname . ifname"
+    `map`*: string               ## value type -- "verdict" for vmaps
     flags*: seq[string]          ## empty = absent
     elem*: seq[NftMapElem]       ## may be empty
 
@@ -204,7 +207,7 @@ type
   # =========================================================================
 
   NftCmdKind* = enum
-    nckAdd, nckDelete, nckMetainfo
+    nckAdd, nckDelete, nckMetainfo, nckRaw
 
   NftAddKind* = enum
     nakTable, nakChain, nakRule, nakSet, nakMap
@@ -233,6 +236,8 @@ type
       delete*: NftDeleteObj
     of nckMetainfo:
       metainfo*: NftMetainfo
+    of nckRaw:
+      rawLines*: seq[string]
 
   NftRuleset* = object
     nftables*: seq[NftCmd]
@@ -287,6 +292,7 @@ proc masqueradeStmt*(port = 0): Stmt = Stmt(kind: skMasquerade, masqPort: port)
 proc vmapStmt*(key, data: Expr): Stmt = Stmt(kind: skVmap, vmapKey: key, vmapData: data)
 proc updateStmt*(setName: string, key: Expr, stmts: seq[Stmt]): Stmt = Stmt(kind: skUpdate, updateSet: setName, updateKey: key, updateStmts: stmts)
 proc counterStmt*(name = ""): Stmt = Stmt(kind: skCounter, counterName: name)
+proc rawStmt*(text: string): Stmt = Stmt(kind: skRaw, rawText: text)
 
 # ---------------------------------------------------------------------------
 # Convenience constructors for top-level commands
@@ -303,34 +309,37 @@ proc addBaseChain*(family, table, name, typ, hook: string, prio: int, policy: st
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakChain, chain: NftChain(
     family: family, table: table, name: name,
     kind: chkBase,
-    chainType: typ, hook: hook, prio: prio, policy: policy)))
+    `type`: typ, hook: hook, prio: prio, policy: policy)))
 
 proc addRule*(family, table, chain: string, expr: seq[Stmt], comment = ""): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakRule, rule: NftRule(
     family: family, table: table, chain: chain, expr: expr, comment: comment)))
 
-proc addSet*(family, table, name, setType: string,
+proc addSet*(family, table, name, typ: string,
              flags: seq[string] = @[], size = 0, timeout = 0,
              elem: seq[Expr] = @[]): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakSet, set: NftSet(
-    family: family, table: table, name: name, setType: setType,
+    family: family, table: table, name: name, `type`: typ,
     kind: setkNamed,
     flags: flags, size: size, timeout: timeout, elem: elem)))
 
-proc addPlainSet*(family, table, name, setType: string, elems: seq[Expr]): NftCmd =
+proc addPlainSet*(family, table, name, typ: string, elems: seq[Expr]): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakSet, set: NftSet(
-    family: family, table: table, name: name, setType: setType,
+    family: family, table: table, name: name, `type`: typ,
     kind: setkPlain, plainElem: elems)))
 
-proc addMap*(family, table, name, keyType, mapType: string,
+proc addMap*(family, table, name, typ, mapVal: string,
              flags: seq[string] = @[],
              elem: seq[NftMapElem] = @[]): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakMap, map: NftMap(
     family: family, table: table, name: name,
-    keyType: keyType, mapType: mapType, flags: flags, elem: elem)))
+    `type`: typ, `map`: mapVal, flags: flags, elem: elem)))
 
 proc deleteTable*(family, name: string): NftCmd =
   NftCmd(kind: nckDelete, deleteWhat: "table", delete: NftDeleteObj(family: family, name: name))
 
 proc metainfoCmd*(): NftCmd =
   NftCmd(kind: nckMetainfo, metainfo: NftMetainfo(json_schema_version: 1))
+
+proc rawCmd*(lines: seq[string]): NftCmd =
+  NftCmd(kind: nckRaw, rawLines: lines)

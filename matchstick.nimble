@@ -8,7 +8,6 @@ bin           = @["matchstick"]
 
 # Dependencies
 requires "nim >= 2.2.0"
-requires "jsony >= 1.1.5"
 
 # Tasks
 task test, "Run all tests":

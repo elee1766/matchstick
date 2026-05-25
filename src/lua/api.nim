@@ -446,6 +446,122 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
   return 0
 
 # ---------------------------------------------------------------------------
+# fw:hook({ pre_start = "...", post_start = "...", ... })
+# ---------------------------------------------------------------------------
+
+proc fwHook(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  luaL_checktype(L, 2, LUA_TTABLE)
+
+  let ps = getStringField(L, 2, "pre_start")
+  if ps != "": state.hooks.preStart = ps
+
+  let pos = getStringField(L, 2, "post_start")
+  if pos != "": state.hooks.postStart = pos
+
+  let prs = getStringField(L, 2, "pre_stop")
+  if prs != "": state.hooks.preStop = prs
+
+  let post = getStringField(L, 2, "post_stop")
+  if post != "": state.hooks.postStop = post
+
+  return 0
+
+# ---------------------------------------------------------------------------
+# fw:chain(hook, { type = "filter", priority = "mangle", rules = {...} })
+# ---------------------------------------------------------------------------
+
+const validHooks = ["prerouting", "postrouting", "forward", "input", "output"]
+const validChainTypes = ["filter", "nat", "route"]
+const validPriorities = ["raw", "mangle", "filter", "security", "srcnat", "dstnat"]
+
+proc fwChain(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  let line = getCurrentLine(L)
+
+  let hook = $luaL_checkstring(L, 2)
+  luaL_checktype(L, 3, LUA_TTABLE)
+
+  if hook notin validHooks:
+    discard luaL_error(L, "fw:chain: hook must be one of prerouting/postrouting/forward/input/output, got '%s'", hook.cstring)
+
+  let chainType = getStringField(L, 3, "type")
+  if chainType == "":
+    discard luaL_error(L, "fw:chain: missing 'type' field (filter/nat/route)")
+  if chainType notin validChainTypes:
+    discard luaL_error(L, "fw:chain: type must be filter/nat/route, got '%s'", chainType.cstring)
+
+  let priority = getStringField(L, 3, "priority")
+  if priority == "":
+    discard luaL_error(L, "fw:chain: missing 'priority' field (raw/mangle/filter/security/srcnat/dstnat or a number)")
+
+  let rawRules = getStringArrayField(L, 3, "rules")
+  if rawRules.len == 0:
+    discard luaL_error(L, "fw:chain: missing 'rules' field (array of nftables rule strings)")
+
+  state.customChains.add CustomChain(
+    hook: hook,
+    chainType: chainType,
+    priority: priority,
+    rawRules: rawRules,
+    line: line,
+  )
+  return 0
+
+# ---------------------------------------------------------------------------
+# fw:raw_nft("raw nftables line", ...)
+# ---------------------------------------------------------------------------
+
+proc fwRawNft(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  let nargs = lua_gettop(L)
+  for i in 2.cint .. nargs:
+    if lua_type(L, i) == LUA_TSTRING:
+      state.rawNft.add $lua_tostring(L, i)
+    else:
+      discard luaL_error(L, "fw:raw_nft: argument %d must be a string", i - 1)
+  return 0
+
+# ---------------------------------------------------------------------------
+# fw:exception(chain, action, service_or_opts?)
+# ---------------------------------------------------------------------------
+
+const validExceptionChains = ["invalid", "rpfilter", "anti_smurf"]
+
+proc fwException(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  let line = getCurrentLine(L)
+
+  let chain = $luaL_checkstring(L, 2)
+  let actionStr = $luaL_checkstring(L, 3)
+
+  if chain notin validExceptionChains:
+    discard luaL_error(L, "fw:exception: chain must be one of invalid/rpfilter/anti_smurf, got '%s'", chain.cstring)
+
+  let action = parseAction(L, actionStr, "fw:exception")
+
+  var exc = ChainException(chain: chain, action: action, line: line)
+
+  # arg 4: service handle, service string, or options table (optional)
+  if not lua_isnoneornil(L, 4):
+    if lua_type(L, 4) == LUA_TSTRING:
+      exc.service = resolveService(L, state, 4)
+    elif lua_istable(L, 4):
+      let typ = getStringField(L, 4, "__type")
+      if typ == "service":
+        exc.service = resolveService(L, state, 4)
+      else:
+        discard lua_getfield(L, 4, "service")
+        if not lua_isnoneornil(L, -1):
+          exc.service = resolveService(L, state, -1)
+        lua_pop(L, 1)
+        exc.proto = getStringArrayField(L, 4, "proto")
+        exc.port = getStringArrayField(L, 4, "port")
+
+  state.chainExceptions.add exc
+  return 0
+
+# ---------------------------------------------------------------------------
 # fw:include("path.lua")
 # ---------------------------------------------------------------------------
 
@@ -552,6 +668,10 @@ proc setupLuaVM*(L: LuaState, state: FirewallState, configFile: string) =
   registerMethod(L, -1, "docker", fwDocker)
   registerMethod(L, -1, "config", fwConfig)
   registerMethod(L, -1, "include", fwInclude)
+  registerMethod(L, -1, "hook", fwHook)
+  registerMethod(L, -1, "chain", fwChain)
+  registerMethod(L, -1, "raw_nft", fwRawNft)
+  registerMethod(L, -1, "exception", fwException)
   lua_setglobal(L, "fw")
 
   # Create the "util" global table

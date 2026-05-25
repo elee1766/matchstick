@@ -87,7 +87,7 @@ suite "Command constructors":
     check cmd.kind == nckAdd
     check cmd.add.kind == nakChain
     check cmd.add.chain.kind == chkBase
-    check cmd.add.chain.chainType == "filter"
+    check cmd.add.chain.`type` == "filter"
     check cmd.add.chain.hook == "input"
     check cmd.add.chain.prio == 5
     check cmd.add.chain.policy == "drop"
@@ -106,7 +106,7 @@ suite "Command constructors":
     let cmd = addSet("inet", "matchstick", "myset", "ipv4_addr", @["timeout"], size = 65535)
     check cmd.add.kind == nakSet
     check cmd.add.set.kind == setkNamed
-    check cmd.add.set.setType == "ipv4_addr"
+    check cmd.add.set.`type` == "ipv4_addr"
     check cmd.add.set.flags == @["timeout"]
     check cmd.add.set.size == 65535
 

@@ -138,6 +138,39 @@ type
     bridges*: seq[string]
 
   # ------------------------------------------------------------------
+  # Hooks (lifecycle commands)
+  # ------------------------------------------------------------------
+
+  HookConfig* = object
+    preStart*: string
+    postStart*: string
+    preStop*: string
+    postStop*: string
+
+  # ------------------------------------------------------------------
+  # Custom chains (mangle / raw / route at arbitrary hooks)
+  # ------------------------------------------------------------------
+
+  CustomChain* = ref object
+    hook*: string              ## "prerouting" | "postrouting" | "forward" | "input" | "output"
+    chainType*: string         ## "filter" | "nat" | "route"
+    priority*: string          ## "mangle" | "raw" | numeric, resolved at build time
+    rawRules*: seq[string]     ## raw nftables rule lines
+    line*: int
+
+  # ------------------------------------------------------------------
+  # Drop chain exceptions
+  # ------------------------------------------------------------------
+
+  ChainException* = ref object
+    chain*: string             ## "invalid" | "rpfilter" | "anti_smurf"
+    action*: Action
+    service*: Option[Service]
+    proto*: seq[string]
+    port*: seq[string]
+    line*: int
+
+  # ------------------------------------------------------------------
   # Global config
   # ------------------------------------------------------------------
 
@@ -181,6 +214,10 @@ type
     ipLists*: OrderedTable[string, IpList]
     dhcp*: seq[DhcpConfig]
     docker*: Option[DockerConfig]
+    hooks*: HookConfig
+    customChains*: seq[CustomChain]
+    rawNft*: seq[string]           ## raw nftables lines injected into the table
+    chainExceptions*: seq[ChainException]
     ## Unified name registry -- all zone and host names.
     ## Used to detect collisions.
     names*: OrderedTable[string, string]  ## name -> "zone" or "host"

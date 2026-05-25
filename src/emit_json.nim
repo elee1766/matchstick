@@ -1,63 +1,17 @@
-## emit_json.nim - nftables JSON serialization via jsony.
+## emit_json.nim - nftables JSON serialization via std/json.
 ##
-## Custom dumpHooks for Expr/Stmt (key-based variant dispatch)
-## and top-level records (field renames like setType→type).
-##
-## Uses auto-comma helpers: jsonObj/jsonFieldVal handle comma insertion
-## automatically. No manual comma tracking needed.
+## Builds JsonNode trees from IR types, then uses std/json for formatting.
+## No manual string building, comma tracking, or template helpers needed.
 
 import std/[strutils, json]
-import jsony
 import ./nft_ir
 
 # ---------------------------------------------------------------------------
-# Auto-comma JSON builder helpers
+# Expr → JsonNode
 # ---------------------------------------------------------------------------
 
-var jFieldCount {.threadvar.}: int
-
-template jsonObj(s: var string, body: untyped) =
-  s.add '{'
-  let saved = jFieldCount
-  jFieldCount = 0
-  body
-  jFieldCount = saved
-  s.add '}'
-
-template jsonArr(s: var string, body: untyped) =
-  s.add '['
-  body
-  s.add ']'
-
-template jsonField(s: var string, key: string, body: untyped) =
-  ## Write "key": <body>  with auto comma before if not first field
-  if jFieldCount > 0: s.add ','
-  s.dumpHook(key)
-  s.add ':'
-  body
-  inc jFieldCount
-
-template jsonFieldVal(s: var string, key: string, val: untyped) =
-  ## Write "key": val  with auto comma
-  if jFieldCount > 0: s.add ','
-  s.dumpHook(key)
-  s.add ':'
-  s.dumpHook(val)
-  inc jFieldCount
-
-template jsonItems[T](s: var string, items: openArray[T]) =
-  for i, item in items:
-    if i > 0: s.add ','
-    s.dumpHook(item)
-
-# ---------------------------------------------------------------------------
-# Expr dumpHook
-# ---------------------------------------------------------------------------
-
-proc dumpHook*(s: var string, e: Expr) =
-  if e == nil:
-    s.add "null"
-    return
+proc toJsonNode*(e: Expr): JsonNode =
+  if e == nil: return newJNull()
   case e.kind
   of ekString:
     if '/' in e.strVal and ('.' in e.strVal or ':' in e.strVal):
@@ -65,335 +19,254 @@ proc dumpHook*(s: var string, e: Expr) =
       if parts.len == 2:
         try:
           let plen = parseInt(parts[1])
-          s.jsonObj:
-            s.jsonField("prefix"):
-              s.jsonObj:
-                s.jsonFieldVal("addr", parts[0])
-                s.jsonFieldVal("len", plen)
-          return
+          return %*{"prefix": {"addr": parts[0], "len": plen}}
         except ValueError: discard
-    s.dumpHook(e.strVal)
-  of ekInt:       s.dumpHook(e.intVal)
-  of ekBool:      s.dumpHook(e.boolVal)
+    return newJString(e.strVal)
+  of ekInt:    return newJInt(e.intVal)
+  of ekBool:   return newJBool(e.boolVal)
   of ekList:
-    s.jsonArr:
-      s.jsonItems(e.listElems)
+    var arr = newJArray()
+    for el in e.listElems: arr.add el.toJsonNode()
+    return arr
   of ekPrefix:
-    s.jsonObj:
-      s.jsonField("prefix"):
-        s.jsonObj:
-          s.jsonFieldVal("addr", e.prefixAddr)
-          s.jsonFieldVal("len", e.prefixLen)
+    return %*{"prefix": {"addr": e.prefixAddr, "len": e.prefixLen}}
   of ekRange:
-    s.jsonObj:
-      s.jsonField("range"):
-        s.jsonArr:
-          s.dumpHook(e.rangeMin)
-          s.add ','
-          s.dumpHook(e.rangeMax)
+    return %*{"range": [e.rangeMin.toJsonNode(), e.rangeMax.toJsonNode()]}
   of ekConcat:
-    s.jsonObj:
-      s.jsonField("concat"):
-        s.jsonArr: s.jsonItems(e.concatExprs)
+    var arr = newJArray()
+    for el in e.concatExprs: arr.add el.toJsonNode()
+    return %*{"concat": arr}
   of ekPayload:
-    s.jsonObj:
-      s.jsonField("payload"):
-        s.jsonObj:
-          s.jsonFieldVal("protocol", e.payloadProto)
-          s.jsonFieldVal("field", e.payloadField)
+    return %*{"payload": {"protocol": e.payloadProto, "field": e.payloadField}}
   of ekMeta:
-    s.jsonObj:
-      s.jsonField("meta"):
-        s.jsonObj:
-          s.jsonFieldVal("key", e.metaKey)
+    return %*{"meta": {"key": e.metaKey}}
   of ekCt:
-    s.jsonObj:
-      s.jsonField("ct"):
-        s.jsonObj:
-          s.jsonFieldVal("key", e.ctKey)
-          if e.ctDir != "": s.jsonFieldVal("dir", e.ctDir)
-          if e.ctFamily != "": s.jsonFieldVal("family", e.ctFamily)
+    var ct = %*{"key": e.ctKey}
+    if e.ctDir != "": ct["dir"] = newJString(e.ctDir)
+    if e.ctFamily != "": ct["family"] = newJString(e.ctFamily)
+    return %*{"ct": ct}
   of ekFib:
-    s.jsonObj:
-      s.jsonField("fib"):
-        s.jsonObj:
-          s.jsonFieldVal("result", e.fibResult)
-          s.jsonField("flags"):
-            s.jsonArr: s.jsonItems(e.fibFlags)
-  of ekSet:       s.dumpHook("@" & e.setName)
+    var flags = newJArray()
+    for f in e.fibFlags: flags.add newJString(f)
+    return %*{"fib": {"result": e.fibResult, "flags": flags}}
+  of ekSet:
+    return newJString("@" & e.setName)
   of ekMap:
-    s.jsonObj:
-      s.jsonField("map"):
-        s.jsonObj:
-          s.jsonFieldVal("key", e.mapKey)
-          s.jsonFieldVal("data", "@" & e.mapData)
+    return %*{"map": {"key": e.mapKey.toJsonNode(), "data": newJString("@" & e.mapData)}}
   of ekElem:
     if e.elemTimeout > 0:
-      s.jsonObj:
-        s.jsonField("elem"):
-          s.jsonObj:
-            s.jsonFieldVal("val", e.elemVal)
-            s.jsonFieldVal("timeout", e.elemTimeout)
+      return %*{"elem": {"val": e.elemVal.toJsonNode(), "timeout": e.elemTimeout}}
     else:
-      s.dumpHook(e.elemVal)
+      return e.elemVal.toJsonNode()
   of ekVerdict:
-    s.jsonObj:
-      case e.verdictKind
-      of "accept", "drop", "return":
-        s.jsonField(e.verdictKind): s.add "null"
-      of "jump", "goto":
-        s.jsonField(e.verdictKind):
-          s.jsonObj: s.jsonFieldVal("target", e.verdictTarget)
-      else:
-        s.jsonField(e.verdictKind): s.add "null"
+    case e.verdictKind
+    of "accept", "drop", "return":
+      return %*{e.verdictKind: newJNull()}
+    of "jump", "goto":
+      return %*{e.verdictKind: {"target": e.verdictTarget}}
+    else:
+      return %*{e.verdictKind: newJNull()}
   of ekBinOp:
-    s.jsonObj:
-      s.jsonField(e.binOp):
-        s.jsonArr:
-          s.dumpHook(e.binLeft)
-          s.add ','
-          s.dumpHook(e.binRight)
+    return %*{e.binOp: [e.binLeft.toJsonNode(), e.binRight.toJsonNode()]}
   of ekAnonymousSet:
-    s.jsonObj:
-      s.jsonField("set"):
-        s.jsonArr: s.jsonItems(e.anonSetElems)
+    var arr = newJArray()
+    for el in e.anonSetElems: arr.add el.toJsonNode()
+    return %*{"set": arr}
 
 # ---------------------------------------------------------------------------
-# Stmt dumpHook
+# Stmt → JsonNode
 # ---------------------------------------------------------------------------
 
-proc dumpHook*(s: var string, st: Stmt) =
-  if st == nil:
-    s.add "null"
-    return
+proc toJsonNode*(st: Stmt): JsonNode =
+  if st == nil: return newJNull()
   case st.kind
   of skMatch:
-    s.jsonObj:
-      s.jsonField("match"):
-        s.jsonObj:
-          s.jsonFieldVal("op", $st.matchOp)
-          s.jsonFieldVal("left", st.matchLeft)
-          s.jsonFieldVal("right", st.matchRight)
-  of skAccept:
-    s.jsonObj:
-      s.jsonField("accept"): s.add "null"
-  of skDrop:
-    s.jsonObj:
-      s.jsonField("drop"): s.add "null"
-  of skReturn:
-    s.jsonObj:
-      s.jsonField("return"): s.add "null"
+    return %*{"match": {
+      "op": $st.matchOp,
+      "left": st.matchLeft.toJsonNode(),
+      "right": st.matchRight.toJsonNode()
+    }}
+  of skAccept:  return %*{"accept": newJNull()}
+  of skDrop:    return %*{"drop": newJNull()}
+  of skReturn:  return %*{"return": newJNull()}
   of skReject:
-    s.jsonObj:
-      s.jsonField("reject"):
-        s.jsonObj:
-          if st.rejectType != "": s.jsonFieldVal("type", st.rejectType)
-          if st.rejectExpr != "": s.jsonFieldVal("expr", st.rejectExpr)
+    var r = newJObject()
+    if st.rejectType != "": r["type"] = newJString(st.rejectType)
+    if st.rejectExpr != "": r["expr"] = newJString(st.rejectExpr)
+    return %*{"reject": r}
   of skJump:
-    s.jsonObj:
-      s.jsonField("jump"):
-        s.jsonObj: s.jsonFieldVal("target", st.jumpTarget)
+    return %*{"jump": {"target": st.jumpTarget}}
   of skGoto:
-    s.jsonObj:
-      s.jsonField("goto"):
-        s.jsonObj: s.jsonFieldVal("target", st.gotoTarget)
+    return %*{"goto": {"target": st.gotoTarget}}
   of skCounter:
-    s.jsonObj:
-      if st.counterName != "":
-        s.jsonFieldVal("counter", st.counterName)
-      else:
-        s.jsonField("counter"):
-          s.jsonObj:
-            s.jsonFieldVal("packets", 0.int)
-            s.jsonFieldVal("bytes", 0.int)
-  of skLog:
-    s.jsonObj:
-      s.jsonField("log"):
-        s.jsonObj:
-          if st.logPrefix != "": s.jsonFieldVal("prefix", st.logPrefix)
-          if st.logLevel != "": s.jsonFieldVal("level", st.logLevel)
-          if st.logFlags.len > 0:
-            s.jsonField("flags"):
-              s.jsonArr: s.jsonItems(st.logFlags)
-  of skLimit:
-    s.jsonObj:
-      s.jsonField("limit"):
-        s.jsonObj:
-          s.jsonFieldVal("rate", st.limitRate)
-          s.jsonFieldVal("per", st.limitPer)
-          if st.limitBurst > 0: s.jsonFieldVal("burst", st.limitBurst)
-          if st.limitInv: s.jsonFieldVal("inv", true)
-  of skDnat:
-    s.jsonObj:
-      s.jsonField("dnat"):
-        s.jsonObj:
-          s.jsonFieldVal("addr", st.dnatAddr)
-          s.jsonFieldVal("family", st.dnatFamily)
-          if st.dnatPort > 0: s.jsonFieldVal("port", st.dnatPort)
-  of skSnat:
-    s.jsonObj:
-      s.jsonField("snat"):
-        s.jsonObj:
-          s.jsonFieldVal("addr", st.snatAddr)
-          s.jsonFieldVal("family", st.snatFamily)
-          if st.snatPort > 0: s.jsonFieldVal("port", st.snatPort)
-  of skMasquerade:
-    s.jsonObj:
-      if st.masqPort > 0:
-        s.jsonField("masquerade"):
-          s.jsonObj: s.jsonFieldVal("port", st.masqPort)
-      else:
-        s.jsonField("masquerade"): s.add "null"
-  of skVmap:
-    s.jsonObj:
-      s.jsonField("vmap"):
-        s.jsonObj:
-          s.jsonFieldVal("key", st.vmapKey)
-          s.jsonFieldVal("data", st.vmapData)
-  of skMangle:
-    s.jsonObj:
-      s.jsonField("mangle"):
-        s.jsonObj:
-          s.jsonFieldVal("key", st.mangleKey)
-          s.jsonFieldVal("value", st.mangleValue)
-  of skUpdate:
-    s.jsonObj:
-      s.jsonField("set"):
-        s.jsonObj:
-          s.jsonFieldVal("op", "update")
-          s.jsonFieldVal("elem", st.updateKey)
-          s.jsonFieldVal("set", "@" & st.updateSet)
-          s.jsonField("stmt"):
-            s.jsonArr: s.jsonItems(st.updateStmts)
-
-# ---------------------------------------------------------------------------
-# NftMapElem dumpHook
-# ---------------------------------------------------------------------------
-
-proc dumpHook*(s: var string, e: NftMapElem) =
-  s.jsonArr:
-    s.dumpHook(e.key)
-    s.add ','
-    s.dumpHook(e.value)
-
-# ---------------------------------------------------------------------------
-# Top-level record dumpHooks
-# ---------------------------------------------------------------------------
-
-proc dumpHook*(s: var string, t: NftTable) =
-  s.jsonObj:
-    s.jsonFieldVal("family", t.family)
-    s.jsonFieldVal("name", t.name)
-
-proc dumpHook*(s: var string, c: NftChain) =
-  s.jsonObj:
-    s.jsonFieldVal("family", c.family)
-    s.jsonFieldVal("table", c.table)
-    s.jsonFieldVal("name", c.name)
-    case c.kind
-    of chkRegular: discard
-    of chkBase:
-      s.jsonFieldVal("type", c.chainType)
-      s.jsonFieldVal("hook", c.hook)
-      s.jsonFieldVal("prio", c.prio)
-      s.jsonFieldVal("policy", c.policy)
-
-proc dumpHook*(s: var string, r: NftRule) =
-  s.jsonObj:
-    s.jsonFieldVal("family", r.family)
-    s.jsonFieldVal("table", r.table)
-    s.jsonFieldVal("chain", r.chain)
-    s.jsonField("expr"):
-      s.jsonArr: s.jsonItems(r.expr)
-    if r.comment != "": s.jsonFieldVal("comment", r.comment)
-
-proc dumpHook*(s: var string, st: NftSet) =
-  s.jsonObj:
-    s.jsonFieldVal("family", st.family)
-    s.jsonFieldVal("table", st.table)
-    s.jsonFieldVal("name", st.name)
-    s.jsonFieldVal("type", st.setType)
-    case st.kind
-    of setkPlain:
-      if st.plainElem.len > 0:
-        s.jsonField("elem"):
-          s.jsonArr: s.jsonItems(st.plainElem)
-    of setkNamed:
-      if st.flags.len > 0:
-        s.jsonField("flags"):
-          s.jsonArr: s.jsonItems(st.flags)
-      if st.size > 0: s.jsonFieldVal("size", st.size)
-      if st.timeout > 0: s.jsonFieldVal("timeout", st.timeout)
-      if st.elem.len > 0:
-        s.jsonField("elem"):
-          s.jsonArr: s.jsonItems(st.elem)
-
-proc dumpHook*(s: var string, m: NftMap) =
-  s.jsonObj:
-    s.jsonFieldVal("family", m.family)
-    s.jsonFieldVal("table", m.table)
-    s.jsonFieldVal("name", m.name)
-    if " . " in m.keyType:
-      s.jsonField("type"):
-        s.jsonArr:
-          let parts = m.keyType.split(" . ")
-          s.jsonItems(parts)
+    if st.counterName != "":
+      return %*{"counter": st.counterName}
     else:
-      s.jsonFieldVal("type", m.keyType)
-    s.jsonFieldVal("map", m.mapType)
-    if m.flags.len > 0:
-      s.jsonField("flags"):
-        s.jsonArr: s.jsonItems(m.flags)
-    if m.elem.len > 0:
-      s.jsonField("elem"):
-        s.jsonArr: s.jsonItems(m.elem)
+      return %*{"counter": {"packets": 0, "bytes": 0}}
+  of skLog:
+    var log = newJObject()
+    if st.logPrefix != "": log["prefix"] = newJString(st.logPrefix)
+    if st.logLevel != "": log["level"] = newJString(st.logLevel)
+    if st.logFlags.len > 0:
+      var flags = newJArray()
+      for f in st.logFlags: flags.add newJString(f)
+      log["flags"] = flags
+    return %*{"log": log}
+  of skLimit:
+    var lim = %*{"rate": st.limitRate, "per": st.limitPer}
+    if st.limitBurst > 0: lim["burst"] = newJInt(st.limitBurst)
+    if st.limitInv: lim["inv"] = newJBool(true)
+    return %*{"limit": lim}
+  of skDnat:
+    var d = %*{"addr": st.dnatAddr, "family": st.dnatFamily}
+    if st.dnatPort > 0: d["port"] = newJInt(st.dnatPort)
+    return %*{"dnat": d}
+  of skSnat:
+    var sn = %*{"addr": st.snatAddr, "family": st.snatFamily}
+    if st.snatPort > 0: sn["port"] = newJInt(st.snatPort)
+    return %*{"snat": sn}
+  of skMasquerade:
+    if st.masqPort > 0:
+      return %*{"masquerade": {"port": st.masqPort}}
+    else:
+      return %*{"masquerade": newJNull()}
+  of skVmap:
+    return %*{"vmap": {
+      "key": st.vmapKey.toJsonNode(),
+      "data": st.vmapData.toJsonNode()
+    }}
+  of skMangle:
+    return %*{"mangle": {
+      "key": st.mangleKey.toJsonNode(),
+      "value": st.mangleValue.toJsonNode()
+    }}
+  of skUpdate:
+    var stmts = newJArray()
+    for sub in st.updateStmts: stmts.add sub.toJsonNode()
+    return %*{"set": {
+      "op": "update",
+      "elem": st.updateKey.toJsonNode(),
+      "set": "@" & st.updateSet,
+      "stmt": stmts
+    }}
+  of skRaw:
+    # Raw nftables statements can't be cleanly represented in JSON.
+    # Emit as a comment-like marker so it's visible but doesn't break schema.
+    return %*{"comment": st.rawText}
 
 # ---------------------------------------------------------------------------
-# NftCmd dumpHook
+# NftMapElem → JsonNode
 # ---------------------------------------------------------------------------
 
-proc dumpHook*(s: var string, cmd: NftCmd) =
+proc toJsonNode*(e: NftMapElem): JsonNode =
+  return %*[e.key.toJsonNode(), e.value.toJsonNode()]
+
+# ---------------------------------------------------------------------------
+# Top-level records → JsonNode
+# ---------------------------------------------------------------------------
+
+proc toJsonNode*(t: NftTable): JsonNode =
+  return %*{"family": t.family, "name": t.name}
+
+proc toJsonNode*(c: NftChain): JsonNode =
+  var j = %*{"family": c.family, "table": c.table, "name": c.name}
+  case c.kind
+  of chkRegular: discard
+  of chkBase:
+    j["type"] = newJString(c.`type`)
+    j["hook"] = newJString(c.hook)
+    j["prio"] = newJInt(c.prio)
+    j["policy"] = newJString(c.policy)
+  return j
+
+proc toJsonNode*(r: NftRule): JsonNode =
+  var exprs = newJArray()
+  for e in r.expr: exprs.add e.toJsonNode()
+  var j = %*{"family": r.family, "table": r.table, "chain": r.chain, "expr": exprs}
+  if r.comment != "": j["comment"] = newJString(r.comment)
+  return j
+
+proc toJsonNode*(st: NftSet): JsonNode =
+  var j = %*{"family": st.family, "table": st.table, "name": st.name, "type": st.`type`}
+  case st.kind
+  of setkPlain:
+    if st.plainElem.len > 0:
+      var arr = newJArray()
+      for e in st.plainElem: arr.add e.toJsonNode()
+      j["elem"] = arr
+  of setkNamed:
+    if st.flags.len > 0:
+      var arr = newJArray()
+      for f in st.flags: arr.add newJString(f)
+      j["flags"] = arr
+    if st.size > 0: j["size"] = newJInt(st.size)
+    if st.timeout > 0: j["timeout"] = newJInt(st.timeout)
+    if st.elem.len > 0:
+      var arr = newJArray()
+      for e in st.elem: arr.add e.toJsonNode()
+      j["elem"] = arr
+  return j
+
+proc toJsonNode*(m: NftMap): JsonNode =
+  var j = %*{"family": m.family, "table": m.table, "name": m.name}
+  if " . " in m.`type`:
+    var arr = newJArray()
+    for part in m.`type`.split(" . "): arr.add newJString(part)
+    j["type"] = arr
+  else:
+    j["type"] = newJString(m.`type`)
+  j["map"] = newJString(m.`map`)
+  if m.flags.len > 0:
+    var arr = newJArray()
+    for f in m.flags: arr.add newJString(f)
+    j["flags"] = arr
+  if m.elem.len > 0:
+    var arr = newJArray()
+    for e in m.elem: arr.add e.toJsonNode()
+    j["elem"] = arr
+  return j
+
+# ---------------------------------------------------------------------------
+# NftCmd → JsonNode
+# ---------------------------------------------------------------------------
+
+proc toJsonNode*(cmd: NftCmd): JsonNode =
   case cmd.kind
   of nckMetainfo:
-    s.jsonObj:
-      s.jsonField("metainfo"):
-        s.jsonObj:
-          s.jsonFieldVal("json_schema_version", cmd.metainfo.json_schema_version)
+    return %*{"metainfo": {"json_schema_version": cmd.metainfo.json_schema_version}}
   of nckAdd:
-    s.jsonObj:
-      s.jsonField("add"):
-        s.jsonObj:
-          case cmd.add.kind
-          of nakTable: s.jsonFieldVal("table", cmd.add.table)
-          of nakChain: s.jsonFieldVal("chain", cmd.add.chain)
-          of nakRule:  s.jsonFieldVal("rule", cmd.add.rule)
-          of nakSet:   s.jsonFieldVal("set", cmd.add.set)
-          of nakMap:   s.jsonFieldVal("map", cmd.add.map)
+    case cmd.add.kind
+    of nakTable: return %*{"add": {"table": cmd.add.table.toJsonNode()}}
+    of nakChain: return %*{"add": {"chain": cmd.add.chain.toJsonNode()}}
+    of nakRule:  return %*{"add": {"rule": cmd.add.rule.toJsonNode()}}
+    of nakSet:   return %*{"add": {"set": cmd.add.set.toJsonNode()}}
+    of nakMap:   return %*{"add": {"map": cmd.add.map.toJsonNode()}}
   of nckDelete:
-    s.jsonObj:
-      s.jsonField("delete"):
-        s.jsonObj:
-          s.jsonField(cmd.deleteWhat):
-            s.jsonObj:
-              s.jsonFieldVal("family", cmd.delete.family)
-              s.jsonFieldVal("name", cmd.delete.name)
+    return %*{"delete": {cmd.deleteWhat: {
+      "family": cmd.delete.family, "name": cmd.delete.name}}}
+  of nckRaw:
+    # Raw nft lines can't be represented in nftables JSON schema.
+    # Emit as comments so they're visible but don't break parsing.
+    var arr = newJArray()
+    for line in cmd.rawLines: arr.add newJString(line)
+    return %*{"comment": {"raw_nft": arr}}
 
 # ---------------------------------------------------------------------------
-# NftRuleset dumpHook
+# NftRuleset → JsonNode
 # ---------------------------------------------------------------------------
 
-proc dumpHook*(s: var string, rs: NftRuleset) =
-  s.jsonObj:
-    s.jsonField("nftables"):
-      s.jsonArr: s.jsonItems(rs.nftables)
+proc toJsonNode*(rs: NftRuleset): JsonNode =
+  var arr = newJArray()
+  for cmd in rs.nftables: arr.add cmd.toJsonNode()
+  return %*{"nftables": arr}
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 proc emitJson*(rs: NftRuleset, pretty: bool = true): string =
-  let compact = rs.toJson()
+  let j = rs.toJsonNode()
   if pretty:
-    return parseJson(compact).pretty() & "\n"
+    return j.pretty() & "\n"
   else:
-    return compact & "\n"
+    return $j & "\n"

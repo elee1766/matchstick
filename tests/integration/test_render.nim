@@ -46,7 +46,8 @@ suite "Golden file: text output":
     check output == expected
 
 suite "Small configs render successfully":
-  for name in ["config", "multi_iface", "include_main", "docker", "named_rate", "minimal"]:
+  for name in ["config", "multi_iface", "include_main", "docker", "named_rate", "minimal",
+                "hooks", "custom_chain", "raw_nft", "exceptions"]:
     test name & ".lua renders":
       let cfg = testdataDir / (name & ".lua")
       let (output, exitCode) = runMatchstick("render", cfg)
@@ -162,3 +163,59 @@ suite "Show commands":
     check "\"rules\"" in output
     check "\"hosts\"" in output
     check "\"services\"" in output
+
+suite "Custom chains (fw:chain)":
+  test "custom chain appears in output":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    check exitCode == 0
+    check "custom_filter_prerouting_0" in output
+    check "custom_filter_forward_1" in output
+
+  test "custom chain has correct hook and priority":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    check exitCode == 0
+    check "hook prerouting" in output
+    check "hook forward" in output
+    # mangle priority = -150, offset = 5, so -145
+    check "filter - 145" in output
+
+  test "custom chain contains raw rules":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    check exitCode == 0
+    check "mark set 0x100/0xff00" in output
+    check "mark set 0x200/0xff00" in output
+    check "maxseg" in output
+
+suite "Raw nftables escape hatch (fw:raw_nft)":
+  test "raw nft lines appear in output":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "raw_nft.lua")
+    check exitCode == 0
+    check "chain my_custom_chain" in output
+    check "tcp dport 12345 accept" in output
+    check "priority filter + 100" in output
+
+suite "Chain exceptions (fw:exception)":
+  test "invalid chain created with exceptions":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "exceptions.lua")
+    check exitCode == 0
+    check "chain invalid {" in output
+    check "tcp dport 443 accept" in output
+    check "udp dport 443 accept" in output
+    check "udp dport 8080 accept" in output
+
+  test "input chain jumps to invalid instead of inline drop":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "exceptions.lua")
+    check exitCode == 0
+    check "ct state invalid jump invalid" in output
+
+  test "anti_smurf has exceptions before drops":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "exceptions.lua")
+    check exitCode == 0
+    # The exception should appear before the fib drops
+    let antiSmurfStart = output.find("chain anti_smurf {")
+    check antiSmurfStart >= 0
+    let dhcpExc = output.find("udp dport { 67, 68 } accept", antiSmurfStart)
+    let fibDrop = output.find("fib saddr type broadcast drop", antiSmurfStart)
+    check dhcpExc >= 0
+    check fibDrop >= 0
+    check dhcpExc < fibDrop  # exception comes before drop

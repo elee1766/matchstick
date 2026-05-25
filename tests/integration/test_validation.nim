@@ -129,3 +129,84 @@ suite "Edge cases":
       fw:policy(wan, self, "drop")
     """)
     check exitCode == 0
+
+suite "Custom chain validation":
+  test "invalid hook name rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("badhook", { type = "filter", priority = "mangle", rules = { "accept" } })
+    """)
+    check exitCode == 1
+    check "hook must be" in output
+
+  test "invalid chain type rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("prerouting", { type = "badtype", priority = "mangle", rules = { "accept" } })
+    """)
+    check exitCode == 1
+    check "type must be" in output
+
+  test "missing rules rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("prerouting", { type = "filter", priority = "mangle" })
+    """)
+    check exitCode == 1
+    check "rules" in output
+
+  test "valid custom chain passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { "accept" } })
+    """)
+    check exitCode == 0
+
+suite "Exception validation":
+  test "invalid chain name rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:exception("badchain", "accept")
+    """)
+    check exitCode == 1
+    check "chain must be" in output
+
+  test "invalid action rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:exception("invalid", "badaction")
+    """)
+    check exitCode == 1
+    check "action must be" in output
+
+  test "valid exception passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      local wan = fw:zone("wan", "eth0")
+      fw:exception("invalid", "accept")
+    """)
+    check exitCode == 0
+
+suite "Raw nft validation":
+  test "non-string argument rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:raw_nft(42)
+    """)
+    check exitCode == 1
+    check "string" in output
+
+  test "valid raw nft passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:raw_nft("chain my_chain { }")
+    """)
+    check exitCode == 0
+
+suite "Hook configuration":
+  test "valid hooks pass":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:hook({ pre_start = "echo hello", post_start = "echo world" })
+    """)
+    check exitCode == 0

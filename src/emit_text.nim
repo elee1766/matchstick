@@ -123,6 +123,8 @@ proc emitStmt*(w: var Writer, s: Stmt) =
     w.add "update @" & s.updateSet & " { " & s.updateKey.toMatchLeft
     for sub in s.updateStmts: w.add " "; w.emitStmt(sub)
     w.add " }"
+  of skRaw:
+    w.add s.rawText
 
 proc emitRuleLine(w: var Writer, stmts: seq[Stmt], comment: string) =
   w.addIndent()
@@ -164,31 +166,42 @@ proc emitText*(rs: NftRuleset): string =
   var sets: Table[TK, seq[NftSet]]
   var maps: Table[TK, seq[NftMap]]
 
+  var rawLines: Table[TK, seq[string]]
+
   for cmd in rs.nftables:
-    if cmd.kind != nckAdd: continue
-    case cmd.add.kind
-    of nakTable:
-      let t = cmd.add.table
-      let key: TK = (t.family, t.name)
-      if key notin chains:
-        tableOrder.add key
-        chains[key] = @[]; rules[key] = @[]; sets[key] = @[]; maps[key] = @[]
-    of nakChain:
-      let c = cmd.add.chain
-      let key: TK = (c.family, c.table)
-      if key in chains: chains[key].add c
-    of nakRule:
-      let r = cmd.add.rule
-      let key: TK = (r.family, r.table)
-      if key in rules: rules[key].add r
-    of nakSet:
-      let s = cmd.add.set
-      let key: TK = (s.family, s.table)
-      if key in sets: sets[key].add s
-    of nakMap:
-      let m = cmd.add.map
-      let key: TK = (m.family, m.table)
-      if key in maps: maps[key].add m
+    case cmd.kind
+    of nckAdd:
+      case cmd.add.kind
+      of nakTable:
+        let t = cmd.add.table
+        let key: TK = (t.family, t.name)
+        if key notin chains:
+          tableOrder.add key
+          chains[key] = @[]; rules[key] = @[]; sets[key] = @[]; maps[key] = @[]
+          rawLines[key] = @[]
+      of nakChain:
+        let c = cmd.add.chain
+        let key: TK = (c.family, c.table)
+        if key in chains: chains[key].add c
+      of nakRule:
+        let r = cmd.add.rule
+        let key: TK = (r.family, r.table)
+        if key in rules: rules[key].add r
+      of nakSet:
+        let s = cmd.add.set
+        let key: TK = (s.family, s.table)
+        if key in sets: sets[key].add s
+      of nakMap:
+        let m = cmd.add.map
+        let key: TK = (m.family, m.table)
+        if key in maps: maps[key].add m
+    of nckRaw:
+      # Associate raw lines with the most recently added table
+      if tableOrder.len > 0:
+        let key = tableOrder[^1]
+        for line in cmd.rawLines:
+          rawLines[key].add line
+    else: discard
 
   for key in tableOrder:
     let (fam, name) = key
@@ -199,10 +212,17 @@ proc emitText*(rs: NftRuleset): string =
     w.emptyLine()
 
     w.braced("table " & tblId):
+      # Raw nftables lines (injected via fw:raw_nft)
+      let raws = rawLines.getOrDefault(key, @[])
+      if raws.len > 0:
+        w.emptyLine()
+        for rawLine in raws:
+          w.line(rawLine)
+
       for s in sets[key]:
         w.emptyLine()
         w.braced("set " & s.name):
-          w.line("type " & s.setType)
+          w.line("type " & s.`type`)
           case s.kind
           of setkPlain:
             if s.plainElem.len > 0:
@@ -217,8 +237,8 @@ proc emitText*(rs: NftRuleset): string =
       for m in maps[key]:
         w.emptyLine()
         w.braced("map " & m.name):
-          let typeStr = if m.mapType == "verdict": m.keyType & " : verdict"
-                        else: m.keyType & " : " & m.mapType
+          let typeStr = if m.`map` == "verdict": m.`type` & " : verdict"
+                        else: m.`type` & " : " & m.`map`
           w.line("type " & typeStr)
           if m.flags.len > 0: w.line("flags " & m.flags.join(", "))
           if m.elem.len > 0:
@@ -242,8 +262,8 @@ proc emitText*(rs: NftRuleset): string =
           case c.kind
           of chkRegular: discard
           of chkBase:
-            let prio = priorityText(c.hook, c.chainType, c.prio)
-            w.line("type " & c.chainType & " hook " & c.hook &
+            let prio = priorityText(c.hook, c.`type`, c.prio)
+            w.line("type " & c.`type` & " hook " & c.hook &
                    " priority " & prio & "; policy " & c.policy & ";")
           for r in cRules:
             w.emitRuleLine(r.expr, r.comment)

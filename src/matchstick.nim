@@ -68,16 +68,19 @@ proc loadConfig(configFile: string): FirewallState =
   return state
 
 proc printSummary(state: FirewallState) =
-  stderr.writeLine &"  zones:    {state.zones.len}"
-  stderr.writeLine &"  hosts:    {state.hosts.len}"
-  stderr.writeLine &"  services: {state.services.len}"
-  stderr.writeLine &"  policies: {state.policies.len}"
-  stderr.writeLine &"  rules:    {state.rules.len}"
-  stderr.writeLine &"  dnat:     {state.dnatRules.len}"
-  stderr.writeLine &"  snat:     {state.snatRules.len}"
-  stderr.writeLine &"  iplists:  {state.ipLists.len}"
-  stderr.writeLine &"  dhcp:     {state.dhcp.len}"
-  stderr.writeLine &"  docker:   {state.docker.isSome}"
+  stderr.writeLine &"  zones:      {state.zones.len}"
+  stderr.writeLine &"  hosts:      {state.hosts.len}"
+  stderr.writeLine &"  services:   {state.services.len}"
+  stderr.writeLine &"  policies:   {state.policies.len}"
+  stderr.writeLine &"  rules:      {state.rules.len}"
+  stderr.writeLine &"  dnat:       {state.dnatRules.len}"
+  stderr.writeLine &"  snat:       {state.snatRules.len}"
+  stderr.writeLine &"  iplists:    {state.ipLists.len}"
+  stderr.writeLine &"  dhcp:       {state.dhcp.len}"
+  stderr.writeLine &"  docker:     {state.docker.isSome}"
+  stderr.writeLine &"  chains:     {state.customChains.len}"
+  stderr.writeLine &"  raw_nft:    {state.rawNft.len}"
+  stderr.writeLine &"  exceptions: {state.chainExceptions.len}"
 
 proc runValidation(state: FirewallState): bool =
   ## Run validation and print messages. Returns true if no errors.
@@ -226,6 +229,13 @@ proc main() =
         stderr.writeLine valResult.error
         quit(1)
 
+      # Run pre_start hook
+      if state.hooks.preStart != "":
+        stderr.writeLine "running pre_start hook..."
+        let hookResult = execShellCmd(state.hooks.preStart)
+        if hookResult != 0:
+          stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
+
       # Apply
       stderr.writeLine "applying..."
       let applyResult = nftApply(text)
@@ -233,6 +243,13 @@ proc main() =
         stderr.writeLine "error: nftables apply failed:"
         stderr.writeLine applyResult.error
         quit(1)
+
+      # Run post_start hook
+      if state.hooks.postStart != "":
+        stderr.writeLine "running post_start hook..."
+        let hookResult = execShellCmd(state.hooks.postStart)
+        if hookResult != 0:
+          stderr.writeLine "warning: post_start hook exited with code " & $hookResult
 
       echo "ok: rules applied"
     except CatchableError as e:
