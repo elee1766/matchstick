@@ -1,6 +1,6 @@
 ## emit_text.nim - nftables text format emission from IR.
 
-import std/[strutils, tables, sequtils, options]
+import std/[strutils, tables, sequtils]
 import ./nft_ir
 import ./writer
 
@@ -203,11 +203,16 @@ proc emitText*(rs: NftRuleset): string =
         w.emptyLine()
         w.braced("set " & s.name):
           w.line("type " & s.setType)
-          if s.flags.isSome: w.line("flags " & s.flags.get.join(", "))
-          if s.size.isSome: w.line("size " & $s.size.get)
-          if s.timeout.isSome: w.line("timeout " & $s.timeout.get & "s")
-          if s.elem.isSome:
-            w.line("elements = { " & s.elem.get.mapIt(it.toText).join(", ") & " }")
+          case s.kind
+          of setkPlain:
+            if s.plainElem.len > 0:
+              w.line("elements = { " & s.plainElem.mapIt(it.toText).join(", ") & " }")
+          of setkNamed:
+            if s.flags.len > 0: w.line("flags " & s.flags.join(", "))
+            if s.size > 0: w.line("size " & $s.size)
+            if s.timeout > 0: w.line("timeout " & $s.timeout & "s")
+            if s.elem.len > 0:
+              w.line("elements = { " & s.elem.mapIt(it.toText).join(", ") & " }")
 
       for m in maps[key]:
         w.emptyLine()
@@ -215,13 +220,12 @@ proc emitText*(rs: NftRuleset): string =
           let typeStr = if m.mapType == "verdict": m.keyType & " : verdict"
                         else: m.keyType & " : " & m.mapType
           w.line("type " & typeStr)
-          if m.flags.isSome: w.line("flags " & m.flags.get.join(", "))
-          if m.elem.isSome:
+          if m.flags.len > 0: w.line("flags " & m.flags.join(", "))
+          if m.elem.len > 0:
             w.line("elements = {")
             w.indented:
-              let elems = m.elem.get
-              for i, elem in elems:
-                let comma = if i < elems.len - 1: "," else: ""
+              for i, elem in m.elem:
+                let comma = if i < m.elem.len - 1: "," else: ""
                 w.line(elem.key.toQuoted & " : " & elem.value.toText & comma)
             w.line("}")
 
@@ -235,13 +239,14 @@ proc emitText*(rs: NftRuleset): string =
         let cRules = chainRules.getOrDefault(c.name, @[])
         w.emptyLine()
         w.braced("chain " & c.name):
-          if c.chainType.isSome:
-            let prio = priorityText(c.hook.get, c.chainType.get, c.prio.get)
-            w.line("type " & c.chainType.get & " hook " & c.hook.get &
-                   " priority " & prio & "; policy " & c.policy.get & ";")
+          case c.kind
+          of chkRegular: discard
+          of chkBase:
+            let prio = priorityText(c.hook, c.chainType, c.prio)
+            w.line("type " & c.chainType & " hook " & c.hook &
+                   " priority " & prio & "; policy " & c.policy & ";")
           for r in cRules:
-            let comment = if r.comment.isSome: r.comment.get else: ""
-            w.emitRuleLine(r.expr, comment)
+            w.emitRuleLine(r.expr, r.comment)
 
     w.emptyLine()
 

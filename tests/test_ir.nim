@@ -1,7 +1,6 @@
 ## Test nft_ir module: expression and statement construction
 
 import unittest
-import std/options
 import ../src/nft_ir
 
 suite "Expr constructors":
@@ -87,31 +86,32 @@ suite "Command constructors":
     let cmd = addBaseChain("inet", "matchstick", "input", "filter", "input", 5, "drop")
     check cmd.kind == nckAdd
     check cmd.add.kind == nakChain
-    check cmd.add.chain.chainType.get == "filter"
-    check cmd.add.chain.hook.get == "input"
-    check cmd.add.chain.prio.get == 5
-    check cmd.add.chain.policy.get == "drop"
+    check cmd.add.chain.kind == chkBase
+    check cmd.add.chain.chainType == "filter"
+    check cmd.add.chain.hook == "input"
+    check cmd.add.chain.prio == 5
+    check cmd.add.chain.policy == "drop"
 
   test "addChain (regular)":
     let cmd = addChain("inet", "matchstick", "mychain")
-    check cmd.add.chain.chainType.isNone
-    check cmd.add.chain.hook.isNone
+    check cmd.add.chain.kind == chkRegular
 
   test "addRule":
     let cmd = addRule("inet", "matchstick", "input", @[acceptStmt()], "test rule")
     check cmd.add.kind == nakRule
     check cmd.add.rule.expr.len == 1
-    check cmd.add.rule.comment.get == "test rule"
+    check cmd.add.rule.comment == "test rule"
 
   test "addSet":
     let cmd = addSet("inet", "matchstick", "myset", "ipv4_addr", @["timeout"], size = 65535)
     check cmd.add.kind == nakSet
+    check cmd.add.set.kind == setkNamed
     check cmd.add.set.setType == "ipv4_addr"
-    check cmd.add.set.flags.get == @["timeout"]
-    check cmd.add.set.size.get == 65535
+    check cmd.add.set.flags == @["timeout"]
+    check cmd.add.set.size == 65535
 
   test "addMap":
     let cmd = addMap("inet", "matchstick", "mymap", "ifname", "verdict",
       elem = @[NftMapElem(key: strExpr("eth0"), value: verdictExpr("jump", "mychain"))])
     check cmd.add.kind == nakMap
-    check cmd.add.map.elem.get.len == 1
+    check cmd.add.map.elem.len == 1

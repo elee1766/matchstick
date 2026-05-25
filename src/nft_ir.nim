@@ -1,13 +1,14 @@
 ## nft_ir.nim - Typed intermediate representation for nftables rulesets.
 ##
-## Top-level objects (NftTable, NftChain, NftRule, NftSet, NftMap) are plain
-## records that serialize to JSON automatically via jsony.
+## Top-level objects (NftTable, NftChain, NftRule, NftSet, NftMap) are records
+## that serialize to JSON via custom dumpHooks in emit_json.nim.
 ##
-## Expr and Stmt are object variants that need custom dumpHook/parseHook
-## because the nftables JSON schema uses key-based dispatch:
-##   {"match": {...}} / {"accept": null} / {"jump": {"target": "..."}}
+## NftChain and NftSet are object variants -- the variant arm determines which
+## fields are present, and the JSON emitter only writes those fields. This
+## avoids `Option[T] = none` rendering as `"field": null` (which nftables JSON
+## rejects).
 
-import std/[strutils, algorithm, options]
+import std/[strutils, algorithm]
 
 type
   # =========================================================================
@@ -136,39 +137,54 @@ type
       updateStmts*: seq[Stmt]
 
   # =========================================================================
-  # Top-level objects -- plain records, auto-serialize via jsony
+  # Top-level objects
   # =========================================================================
 
   NftTable* = object
     family*: string
     name*: string
 
+  NftChainKind* = enum
+    chkRegular   ## user-defined chain (no hook, no policy)
+    chkBase      ## base chain attached to a netfilter hook
+
   NftChain* = object
     family*: string
     table*: string
     name*: string
-    # Base chain fields (omitted for regular chains via Option)
-    chainType*: Option[string]   ## "filter", "nat", "route"  (JSON field: "type")
-    hook*: Option[string]        ## "input", "output", "forward", "prerouting", "postrouting"
-    prio*: Option[int]
-    policy*: Option[string]      ## "accept", "drop"
+    case kind*: NftChainKind
+    of chkRegular:
+      discard
+    of chkBase:
+      chainType*: string   ## "filter" | "nat" | "route"   (JSON field: "type")
+      hook*: string        ## "input" | "output" | "forward" | "prerouting" | "postrouting"
+      prio*: int
+      policy*: string      ## "accept" | "drop"
 
   NftRule* = object
     family*: string
     table*: string
     chain*: string
     expr*: seq[Stmt]
-    comment*: Option[string]
+    comment*: string       ## "" means no comment
+
+  NftSetKind* = enum
+    setkPlain      ## anonymous/literal -- elements directly, no flags/size/timeout
+    setkNamed      ## named set with optional flags/size/timeout
 
   NftSet* = object
     family*: string
     table*: string
     name*: string
     setType*: string             ## "ipv4_addr", "ipv6_addr", etc. (JSON field: "type")
-    flags*: Option[seq[string]]
-    size*: Option[int]
-    timeout*: Option[int]
-    elem*: Option[seq[Expr]]
+    case kind*: NftSetKind
+    of setkPlain:
+      plainElem*: seq[Expr]
+    of setkNamed:
+      flags*: seq[string]        ## empty = absent
+      size*: int                 ## 0 = absent
+      timeout*: int              ## 0 = absent
+      elem*: seq[Expr]           ## may be empty
 
   NftMapElem* = object
     key*: Expr
@@ -180,8 +196,8 @@ type
     name*: string
     keyType*: string             ## key type (JSON field: "type") -- may be "ifname . ifname"
     mapType*: string             ## value type (JSON field: "map") -- "verdict" for vmaps
-    flags*: Option[seq[string]]
-    elem*: Option[seq[NftMapElem]]
+    flags*: seq[string]          ## empty = absent
+    elem*: seq[NftMapElem]       ## may be empty
 
   # =========================================================================
   # Command wrappers -- the actual JSON structure
@@ -280,37 +296,38 @@ proc addTable*(family, name: string): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakTable, table: NftTable(family: family, name: name)))
 
 proc addChain*(family, table, name: string): NftCmd =
-  NftCmd(kind: nckAdd, add: NftAddObj(kind: nakChain, chain: NftChain(family: family, table: table, name: name)))
+  NftCmd(kind: nckAdd, add: NftAddObj(kind: nakChain, chain: NftChain(
+    family: family, table: table, name: name, kind: chkRegular)))
 
 proc addBaseChain*(family, table, name, typ, hook: string, prio: int, policy: string): NftCmd =
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakChain, chain: NftChain(
     family: family, table: table, name: name,
-    chainType: some(typ), hook: some(hook), prio: some(prio), policy: some(policy))))
+    kind: chkBase,
+    chainType: typ, hook: hook, prio: prio, policy: policy)))
 
 proc addRule*(family, table, chain: string, expr: seq[Stmt], comment = ""): NftCmd =
-  let c = if comment != "": some(comment) else: none(string)
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakRule, rule: NftRule(
-    family: family, table: table, chain: chain, expr: expr, comment: c)))
+    family: family, table: table, chain: chain, expr: expr, comment: comment)))
 
 proc addSet*(family, table, name, setType: string,
              flags: seq[string] = @[], size = 0, timeout = 0,
              elem: seq[Expr] = @[]): NftCmd =
-  let f = if flags.len > 0: some(flags) else: none(seq[string])
-  let s = if size > 0: some(size) else: none(int)
-  let t = if timeout > 0: some(timeout) else: none(int)
-  let e = if elem.len > 0: some(elem) else: none(seq[Expr])
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakSet, set: NftSet(
     family: family, table: table, name: name, setType: setType,
-    flags: f, size: s, timeout: t, elem: e)))
+    kind: setkNamed,
+    flags: flags, size: size, timeout: timeout, elem: elem)))
+
+proc addPlainSet*(family, table, name, setType: string, elems: seq[Expr]): NftCmd =
+  NftCmd(kind: nckAdd, add: NftAddObj(kind: nakSet, set: NftSet(
+    family: family, table: table, name: name, setType: setType,
+    kind: setkPlain, plainElem: elems)))
 
 proc addMap*(family, table, name, keyType, mapType: string,
              flags: seq[string] = @[],
              elem: seq[NftMapElem] = @[]): NftCmd =
-  let f = if flags.len > 0: some(flags) else: none(seq[string])
-  let e = if elem.len > 0: some(elem) else: none(seq[NftMapElem])
   NftCmd(kind: nckAdd, add: NftAddObj(kind: nakMap, map: NftMap(
     family: family, table: table, name: name,
-    keyType: keyType, mapType: mapType, flags: f, elem: e)))
+    keyType: keyType, mapType: mapType, flags: flags, elem: elem)))
 
 proc deleteTable*(family, name: string): NftCmd =
   NftCmd(kind: nckDelete, deleteWhat: "table", delete: NftDeleteObj(family: family, name: name))

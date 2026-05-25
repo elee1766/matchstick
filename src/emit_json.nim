@@ -6,7 +6,7 @@
 ## Uses auto-comma helpers: jsonObj/jsonFieldVal handle comma insertion
 ## automatically. No manual comma tracking needed.
 
-import std/[strutils, options, json]
+import std/[strutils, json]
 import jsony
 import ./nft_ir
 
@@ -290,10 +290,13 @@ proc dumpHook*(s: var string, c: NftChain) =
     s.jsonFieldVal("family", c.family)
     s.jsonFieldVal("table", c.table)
     s.jsonFieldVal("name", c.name)
-    if c.chainType.isSome: s.jsonFieldVal("type", c.chainType.get)
-    if c.hook.isSome: s.jsonFieldVal("hook", c.hook.get)
-    if c.prio.isSome: s.jsonFieldVal("prio", c.prio.get)
-    if c.policy.isSome: s.jsonFieldVal("policy", c.policy.get)
+    case c.kind
+    of chkRegular: discard
+    of chkBase:
+      s.jsonFieldVal("type", c.chainType)
+      s.jsonFieldVal("hook", c.hook)
+      s.jsonFieldVal("prio", c.prio)
+      s.jsonFieldVal("policy", c.policy)
 
 proc dumpHook*(s: var string, r: NftRule) =
   s.jsonObj:
@@ -302,7 +305,7 @@ proc dumpHook*(s: var string, r: NftRule) =
     s.jsonFieldVal("chain", r.chain)
     s.jsonField("expr"):
       s.jsonArr: s.jsonItems(r.expr)
-    if r.comment.isSome: s.jsonFieldVal("comment", r.comment.get)
+    if r.comment != "": s.jsonFieldVal("comment", r.comment)
 
 proc dumpHook*(s: var string, st: NftSet) =
   s.jsonObj:
@@ -310,14 +313,20 @@ proc dumpHook*(s: var string, st: NftSet) =
     s.jsonFieldVal("table", st.table)
     s.jsonFieldVal("name", st.name)
     s.jsonFieldVal("type", st.setType)
-    if st.flags.isSome:
-      s.jsonField("flags"):
-        s.jsonArr: s.jsonItems(st.flags.get)
-    if st.size.isSome: s.jsonFieldVal("size", st.size.get)
-    if st.timeout.isSome: s.jsonFieldVal("timeout", st.timeout.get)
-    if st.elem.isSome:
-      s.jsonField("elem"):
-        s.jsonArr: s.jsonItems(st.elem.get)
+    case st.kind
+    of setkPlain:
+      if st.plainElem.len > 0:
+        s.jsonField("elem"):
+          s.jsonArr: s.jsonItems(st.plainElem)
+    of setkNamed:
+      if st.flags.len > 0:
+        s.jsonField("flags"):
+          s.jsonArr: s.jsonItems(st.flags)
+      if st.size > 0: s.jsonFieldVal("size", st.size)
+      if st.timeout > 0: s.jsonFieldVal("timeout", st.timeout)
+      if st.elem.len > 0:
+        s.jsonField("elem"):
+          s.jsonArr: s.jsonItems(st.elem)
 
 proc dumpHook*(s: var string, m: NftMap) =
   s.jsonObj:
@@ -332,12 +341,12 @@ proc dumpHook*(s: var string, m: NftMap) =
     else:
       s.jsonFieldVal("type", m.keyType)
     s.jsonFieldVal("map", m.mapType)
-    if m.flags.isSome:
+    if m.flags.len > 0:
       s.jsonField("flags"):
-        s.jsonArr: s.jsonItems(m.flags.get)
-    if m.elem.isSome:
+        s.jsonArr: s.jsonItems(m.flags)
+    if m.elem.len > 0:
       s.jsonField("elem"):
-        s.jsonArr: s.jsonItems(m.elem.get)
+        s.jsonArr: s.jsonItems(m.elem)
 
 # ---------------------------------------------------------------------------
 # NftCmd dumpHook
