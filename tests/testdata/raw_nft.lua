@@ -1,10 +1,26 @@
--- Test fw:raw_nft() escape hatch
+-- Test fw:raw_nft() escape hatch with nftables JSON
 local self = fw:zone("fw")
 local wan = fw:zone("wan", "eth0")
 fw:policy(wan, self, "drop")
 
--- Inject raw nftables lines into the table
-fw:raw_nft("chain my_custom_chain {")
-fw:raw_nft("    type filter hook input priority filter + 100; policy accept;")
-fw:raw_nft("    tcp dport 12345 accept")
-fw:raw_nft("}")
+-- Inject a raw chain + rule as nftables JSON command objects
+fw:raw_nft(
+  { add = { chain = {
+    family = "inet",
+    table = "matchstick",
+    name = "my_custom_chain",
+    type = "filter",
+    hook = "input",
+    prio = 100,
+    policy = "accept",
+  }}},
+  { add = { rule = {
+    family = "inet",
+    table = "matchstick",
+    chain = "my_custom_chain",
+    expr = {
+      { match = { op = "==", left = { payload = { protocol = "tcp", field = "dport" } }, right = 12345 } },
+      { accept = {} },
+    },
+  }}}
+)

@@ -1,6 +1,7 @@
 ## matchstick - Lua-based nftables firewall configuration tool
 
-import std/[os, strformat, options, tables, strutils]
+import std/[os, strformat, options, tables, parseopt, strutils]
+import experimental/diff
 import ./lua/ffi
 import ./types
 import ./lua/api
@@ -17,31 +18,29 @@ const
   ]
 
 proc findConfig(): string =
-  ## Find the config file from default paths.
   for path in defaultConfigPaths:
-    if fileExists(path):
-      return path
+    if fileExists(path): return path
   return ""
 
 proc usage() =
-  echo "matchstick - Lua-based nftables firewall configuration tool"
-  echo ""
-  echo "Usage:"
-  echo "  matchstick check  [config.lua]                    Validate config"
-  echo "  matchstick render [config.lua]                    Print nftables text"
-  echo "  matchstick render --json [config.lua]             Print nftables JSON"
-  echo "  matchstick apply  [config.lua]                    Apply to kernel"
-  echo "  matchstick diff   [config.lua]                    Diff running vs generated"
-  echo ""
-  echo "  matchstick show matrix   [config.lua]             Zone policy matrix"
-  echo "  matchstick show rules    [config.lua] <src> <dst> Rules for zone pair"
-  echo "  matchstick show topology [config.lua]             Topology diagram"
-  echo "    --format=dot|d2|mermaid|ascii                     (default: ascii)"
-  echo "  matchstick show json     [config.lua]             State as JSON"
-  echo ""
-  echo "If no config file is specified, searches:"
+  stderr.writeLine """matchstick - Lua-based nftables firewall configuration tool
+
+Usage:
+  matchstick check  [config.lua]                    Validate config
+  matchstick render [config.lua]                    Print nftables text
+  matchstick render --json [config.lua]             Print nftables JSON
+  matchstick apply  [config.lua]                    Apply to kernel
+  matchstick diff   [config.lua]                    Diff running vs generated
+
+  matchstick show matrix   [config.lua]             Zone policy matrix
+  matchstick show rules    [config.lua] <src> <dst> Rules for zone pair
+  matchstick show topology [config.lua]             Topology diagram
+    --format=dot|d2|mermaid|ascii                     (default: ascii)
+  matchstick show json     [config.lua]             State as JSON
+
+If no config file is specified, searches:"""
   for p in defaultConfigPaths:
-    echo "  " & p
+    stderr.writeLine "  " & p
   quit(1)
 
 proc loadConfig(configFile: string): FirewallState =
@@ -68,22 +67,21 @@ proc loadConfig(configFile: string): FirewallState =
   return state
 
 proc printSummary(state: FirewallState) =
-  stderr.writeLine &"  zones:      {state.zones.len}"
-  stderr.writeLine &"  hosts:      {state.hosts.len}"
-  stderr.writeLine &"  services:   {state.services.len}"
-  stderr.writeLine &"  policies:   {state.policies.len}"
-  stderr.writeLine &"  rules:      {state.rules.len}"
-  stderr.writeLine &"  dnat:       {state.dnatRules.len}"
-  stderr.writeLine &"  snat:       {state.snatRules.len}"
-  stderr.writeLine &"  iplists:    {state.ipLists.len}"
-  stderr.writeLine &"  dhcp:       {state.dhcp.len}"
-  stderr.writeLine &"  docker:     {state.docker.isSome}"
-  stderr.writeLine &"  chains:     {state.customChains.len}"
-  stderr.writeLine &"  raw_nft:    {state.rawNft.len}"
-  stderr.writeLine &"  exceptions: {state.chainExceptions.len}"
+  stderr.writeLine &"""  zones:      {state.zones.len}
+  hosts:      {state.hosts.len}
+  services:   {state.services.len}
+  policies:   {state.policies.len}
+  rules:      {state.rules.len}
+  dnat:       {state.dnatRules.len}
+  snat:       {state.snatRules.len}
+  iplists:    {state.ipLists.len}
+  dhcp:       {state.dhcp.len}
+  docker:     {state.docker.isSome}
+  chains:     {state.customChains.len}
+  raw_nft:    {state.rawNft.len}
+  exceptions: {state.chainExceptions.len}"""
 
 proc runValidation(state: FirewallState): bool =
-  ## Run validation and print messages. Returns true if no errors.
   let msgs = validate(state)
   var hasErrors = false
   for m in msgs:
@@ -97,210 +95,244 @@ proc runValidation(state: FirewallState): bool =
     stderr.writeLine "warning: " & w
   return not hasErrors
 
-proc main() =
-  let args = commandLineParams()
-  if args.len < 2:
+# ---------------------------------------------------------------------------
+# Parse CLI
+# ---------------------------------------------------------------------------
+
+type
+  CliOpts = object
+    command: string       ## "check", "render", "apply", "diff", "show"
+    showSub: string       ## "matrix", "rules", "topology", "json"
+    configFile: string
+    jsonOutput: bool
+    format: string        ## topology format
+    extraArgs: seq[string]
+
+proc parseCli(): CliOpts =
+  result.format = "ascii"
+
+  var positionals: seq[string]
+  var p = initOptParser(commandLineParams())
+
+  for kind, key, val in p.getopt():
+    case kind
+    of cmdArgument:
+      positionals.add key
+    of cmdShortOption, cmdLongOption:
+      case key
+      of "json", "j": result.jsonOutput = true
+      of "format": result.format = val
+      of "help", "h": usage()
+      else:
+        stderr.writeLine "error: unknown option: --" & key
+        usage()
+    of cmdEnd: discard
+
+  if positionals.len == 0:
     usage()
 
-  let command = args[0]
+  result.command = positionals[0]
+  var rest = positionals[1..^1]
 
-  # Handle "show" subcommand family
-  if command == "show":
-    if args.len < 3:
+  if result.command == "show":
+    if rest.len == 0:
       usage()
-    let subCmd = args[1]
-    var configFile = ""
-    var formatStr = "ascii"
-    var extraArgs: seq[string]
+    result.showSub = rest[0]
+    rest = rest[1..^1]
 
-    for i in 2 ..< args.len:
-      if args[i].startsWith("--format="):
-        formatStr = args[i].split("=", 1)[1]
-      elif configFile == "" and fileExists(args[i]):
-        configFile = args[i]
-      else:
-        extraArgs.add args[i]
-
-    if configFile == "":
-      stderr.writeLine "error: no config file specified"
-      quit(1)
-
-    try:
-      let state = loadConfig(configFile)
-      discard runValidation(state)
-
-      case subCmd
-      of "matrix":
-        showMatrix(state)
-      of "rules":
-        if extraArgs.len < 2:
-          stderr.writeLine "error: show rules requires <src> <dst> arguments"
-          quit(1)
-        showRules(state, extraArgs[0], extraArgs[1])
-      of "topology":
-        case formatStr
-        of "dot": showTopologyDot(state)
-        of "d2": showTopologyD2(state)
-        of "mermaid": showTopologyMermaid(state)
-        of "ascii": showTopologyAscii(state)
-        else:
-          stderr.writeLine "error: unknown format: " & formatStr
-          quit(1)
-      of "json":
-        showStateJson(state)
-      else:
-        stderr.writeLine "error: unknown show subcommand: " & subCmd
-        usage()
-    except CatchableError as e:
-      stderr.writeLine "error: " & e.msg
-      quit(1)
-    return
-
-  # Regular commands
-  var jsonOutput = false
-  var configFile = ""
-  for i in 1 ..< args.len:
-    case args[i]
-    of "--json", "-j":
-      jsonOutput = true
+  # Find config file among remaining positionals
+  for i, arg in rest:
+    if result.configFile == "" and fileExists(arg):
+      result.configFile = arg
     else:
-      if configFile == "":
-        configFile = args[i]
+      result.extraArgs.add arg
 
-  # If no config file specified, search defaults
-  if configFile == "":
-    configFile = findConfig()
-    if configFile == "":
-      stderr.writeLine "error: no config file specified and none found at default paths"
-      for p in defaultConfigPaths:
-        stderr.writeLine "  looked in: " & p
-      quit(1)
+  # Fall back to default config paths
+  if result.configFile == "":
+    result.configFile = findConfig()
 
-  if not fileExists(configFile):
-    stderr.writeLine "error: file not found: " & configFile
+proc requireConfig(opts: CliOpts) =
+  if opts.configFile == "":
+    stderr.writeLine "error: no config file specified and none found at default paths"
+    for p in defaultConfigPaths:
+      stderr.writeLine "  looked in: " & p
+    quit(1)
+  if not fileExists(opts.configFile):
+    stderr.writeLine "error: file not found: " & opts.configFile
     quit(1)
 
-  case command
-  of "check":
-    try:
-      let state = loadConfig(configFile)
-      let ok = runValidation(state)
-      printSummary(state)
-      if ok:
-        echo "ok: " & configFile
-      else:
-        echo "FAIL: " & configFile & " (has errors)"
-        quit(1)
-    except CatchableError as e:
-      stderr.writeLine "error: " & e.msg
-      quit(1)
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 
-  of "render":
-    try:
-      let state = loadConfig(configFile)
-      let ok = runValidation(state)
-      if not ok:
-        stderr.writeLine "error: config has validation errors"
-        quit(1)
-      let ruleset = buildRuleset(state)
-      if jsonOutput:
-        stdout.write emitJson(ruleset)
-      else:
-        stdout.write emitText(ruleset)
-    except CatchableError as e:
-      stderr.writeLine "error: " & e.msg
-      quit(1)
-
-  of "apply":
-    try:
-      let state = loadConfig(configFile)
-      let ok = runValidation(state)
-      if not ok:
-        stderr.writeLine "error: config has validation errors, refusing to apply"
-        quit(1)
-      let ruleset = buildRuleset(state)
-      let text = emitText(ruleset)
-
-      # First validate via dry-run
-      stderr.writeLine "validating..."
-      let valResult = nftValidate(text)
-      if not valResult.success:
-        stderr.writeLine "error: nftables validation failed:"
-        stderr.writeLine valResult.error
-        quit(1)
-
-      # Run pre_start hook
-      if state.hooks.preStart != "":
-        stderr.writeLine "running pre_start hook..."
-        let hookResult = execShellCmd(state.hooks.preStart)
-        if hookResult != 0:
-          stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
-
-      # Apply
-      stderr.writeLine "applying..."
-      let applyResult = nftApply(text)
-      if not applyResult.success:
-        stderr.writeLine "error: nftables apply failed:"
-        stderr.writeLine applyResult.error
-        quit(1)
-
-      # Run post_start hook
-      if state.hooks.postStart != "":
-        stderr.writeLine "running post_start hook..."
-        let hookResult = execShellCmd(state.hooks.postStart)
-        if hookResult != 0:
-          stderr.writeLine "warning: post_start hook exited with code " & $hookResult
-
-      echo "ok: rules applied"
-    except CatchableError as e:
-      stderr.writeLine "error: " & e.msg
-      quit(1)
-
-  of "diff":
-    try:
-      let state = loadConfig(configFile)
-      discard runValidation(state)
-      let ruleset = buildRuleset(state)
-      let generated = emitText(ruleset)
-
-      # Get the running ruleset for our table
-      let tn = state.config.tableName
-      let currentFilter = nftListTable("inet", tn)
-      let currentNat = nftListTable("inet", tn & "_nat")
-
-      var running = ""
-      if currentFilter.success:
-        running &= currentFilter.output
-      if currentNat.success:
-        running &= currentNat.output
-
-      if running == "":
-        stderr.writeLine "note: no running matchstick tables found (table inet " & tn & ")"
-        echo "--- (no running rules)"
-        echo "+++ (generated)"
-        echo generated
-      else:
-        # Write both to temp files and diff
-        let tmpGen = getTempDir() / "matchstick-generated.nft"
-        let tmpRun = getTempDir() / "matchstick-running.nft"
-        writeFile(tmpGen, generated)
-        writeFile(tmpRun, running)
-
-        let diffCmd = "diff -u " & tmpRun & " " & tmpGen &
-                      " --label running --label generated"
-        let exitCode = execShellCmd(diffCmd)
-        if exitCode == 0:
-          echo "no differences"
-
-        removeFile(tmpGen)
-        removeFile(tmpRun)
-    except CatchableError as e:
-      stderr.writeLine "error: " & e.msg
-      quit(1)
-
+proc cmdCheck(opts: CliOpts) =
+  let state = loadConfig(opts.configFile)
+  let ok = runValidation(state)
+  printSummary(state)
+  if ok:
+    echo "ok: " & opts.configFile
   else:
-    stderr.writeLine "error: unknown command: " & command
+    echo "FAIL: " & opts.configFile & " (has errors)"
+    quit(1)
+
+proc cmdRender(opts: CliOpts) =
+  let state = loadConfig(opts.configFile)
+  let ok = runValidation(state)
+  if not ok:
+    stderr.writeLine "error: config has validation errors"
+    quit(1)
+  let ruleset = buildRuleset(state)
+  if opts.jsonOutput:
+    stdout.write emitJson(ruleset)
+  else:
+    stdout.write emitText(ruleset)
+
+proc cmdApply(opts: CliOpts) =
+  let state = loadConfig(opts.configFile)
+  let ok = runValidation(state)
+  if not ok:
+    stderr.writeLine "error: config has validation errors, refusing to apply"
+    quit(1)
+  let ruleset = buildRuleset(state)
+  let text = emitText(ruleset)
+
+  stderr.writeLine "validating..."
+  let valResult = nftValidate(text)
+  if not valResult.success:
+    stderr.writeLine "error: nftables validation failed:"
+    stderr.writeLine valResult.error
+    quit(1)
+
+  if state.hooks.preStart != "":
+    stderr.writeLine "running pre_start hook..."
+    let hookResult = execShellCmd(state.hooks.preStart)
+    if hookResult != 0:
+      stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
+
+  stderr.writeLine "applying..."
+  let applyResult = nftApply(text)
+  if not applyResult.success:
+    stderr.writeLine "error: nftables apply failed:"
+    stderr.writeLine applyResult.error
+    quit(1)
+
+  if state.hooks.postStart != "":
+    stderr.writeLine "running post_start hook..."
+    let hookResult = execShellCmd(state.hooks.postStart)
+    if hookResult != 0:
+      stderr.writeLine "warning: post_start hook exited with code " & $hookResult
+
+  echo "ok: rules applied"
+
+proc unifiedDiff(a, b: string, labelA = "running", labelB = "generated", context = 3): string =
+  ## Produce unified diff output in memory.
+  let linesA = a.splitLines()
+  let linesB = b.splitLines()
+  let items = diffText(a, b)
+
+  if items.len == 0: return ""
+
+  result.add "--- " & labelA & "\n"
+  result.add "+++ " & labelB & "\n"
+
+  for item in items:
+    # Context window around this change
+    let startA = max(0, item.startA - context)
+    let startB = max(0, item.startB - context)
+    let endA = min(linesA.len, item.startA + item.deletedA + context)
+    let endB = min(linesB.len, item.startB + item.insertedB + context)
+    let countA = endA - startA
+    let countB = endB - startB
+
+    result.add &"@@ -{startA + 1},{countA} +{startB + 1},{countB} @@\n"
+
+    # Leading context
+    for i in startA ..< item.startA:
+      result.add " " & linesA[i] & "\n"
+    # Deletions
+    for i in item.startA ..< item.startA + item.deletedA:
+      result.add "-" & linesA[i] & "\n"
+    # Insertions
+    for i in item.startB ..< item.startB + item.insertedB:
+      result.add "+" & linesB[i] & "\n"
+    # Trailing context
+    for i in item.startA + item.deletedA ..< endA:
+      result.add " " & linesA[i] & "\n"
+
+proc cmdDiff(opts: CliOpts) =
+  let state = loadConfig(opts.configFile)
+  discard runValidation(state)
+  let ruleset = buildRuleset(state)
+  let generated = emitText(ruleset)
+
+  let tn = state.config.tableName
+  let currentFilter = nftListTable("inet", tn)
+  let currentNat = nftListTable("inet", tn & "_nat")
+
+  var running = ""
+  if currentFilter.success: running &= currentFilter.output
+  if currentNat.success: running &= currentNat.output
+
+  if running == "":
+    stderr.writeLine "note: no running matchstick tables found (table inet " & tn & ")"
+    echo "--- (no running rules)"
+    echo "+++ (generated)"
+    echo generated
+  else:
+    let d = unifiedDiff(running, generated)
+    if d == "":
+      echo "no differences"
+    else:
+      stdout.write d
+
+proc cmdShow(opts: CliOpts) =
+  let state = loadConfig(opts.configFile)
+  discard runValidation(state)
+
+  case opts.showSub
+  of "matrix":
+    showMatrix(state)
+  of "rules":
+    if opts.extraArgs.len < 2:
+      stderr.writeLine "error: show rules requires <src> <dst> arguments"
+      quit(1)
+    showRules(state, opts.extraArgs[0], opts.extraArgs[1])
+  of "topology":
+    case opts.format
+    of "dot": showTopologyDot(state)
+    of "d2": showTopologyD2(state)
+    of "mermaid": showTopologyMermaid(state)
+    of "ascii": showTopologyAscii(state)
+    else:
+      stderr.writeLine "error: unknown format: " & opts.format
+      quit(1)
+  of "json":
+    showStateJson(state)
+  else:
+    stderr.writeLine "error: unknown show subcommand: " & opts.showSub
     usage()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+proc main() =
+  let opts = parseCli()
+  requireConfig(opts)
+
+  try:
+    case opts.command
+    of "check":   cmdCheck(opts)
+    of "render":  cmdRender(opts)
+    of "apply":   cmdApply(opts)
+    of "diff":    cmdDiff(opts)
+    of "show":    cmdShow(opts)
+    else:
+      stderr.writeLine "error: unknown command: " & opts.command
+      usage()
+  except CatchableError as e:
+    stderr.writeLine "error: " & e.msg
+    quit(1)
 
 when isMainModule:
   main()

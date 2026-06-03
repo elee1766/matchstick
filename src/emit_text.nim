@@ -1,6 +1,6 @@
 ## emit_text.nim - nftables text format emission from IR.
 
-import std/[strutils, tables, sequtils]
+import std/[strutils, tables, sequtils, json]
 import ./nft_ir
 import ./writer
 
@@ -71,6 +71,151 @@ proc toQuoted*(e: Expr): string =
   else: e.toText
 
 # ---------------------------------------------------------------------------
+# nftables JSON → text (for raw passthrough)
+# ---------------------------------------------------------------------------
+
+proc nftJsonToText*(j: JsonNode): string =
+  ## Convert an nftables JSON node (statement or expression) to text.
+  ## Handles the common nftables JSON schema structures.
+  if j == nil or j.kind == JNull:
+    return ""
+  case j.kind
+  of JString: return j.getStr()
+  of JInt: return $j.getInt()
+  of JFloat: return $j.getFloat()
+  of JBool: return (if j.getBool(): "1" else: "0")
+  of JArray:
+    var parts: seq[string]
+    for elem in j: parts.add nftJsonToText(elem)
+    return parts.join(" ")
+  of JObject:
+    # Handle known nftables JSON structures
+    if "match" in j:
+      let m = j["match"]
+      let left = nftJsonToText(m.getOrDefault("left"))
+      let right = nftJsonToText(m.getOrDefault("right"))
+      let op = m.getOrDefault("op").getStr("==")
+      return left & " " & op & " " & right
+    if "accept" in j: return "accept"
+    if "drop" in j: return "drop"
+    if "return" in j: return "return"
+    if "reject" in j:
+      let r = j["reject"]
+      var s = "reject"
+      if "type" in r: s &= " with " & r["type"].getStr()
+      if "expr" in r: s &= " " & r["expr"].getStr()
+      return s
+    if "jump" in j:
+      let t = j["jump"]
+      return "jump " & t.getOrDefault("target").getStr()
+    if "goto" in j:
+      let t = j["goto"]
+      return "goto " & t.getOrDefault("target").getStr()
+    if "counter" in j: return "counter"
+    if "log" in j:
+      let l = j["log"]
+      var s = "log"
+      if "prefix" in l: s &= " prefix \"" & l["prefix"].getStr() & "\""
+      if "level" in l: s &= " level " & l["level"].getStr()
+      return s
+    if "limit" in j:
+      let l = j["limit"]
+      var s = "limit rate "
+      if l.getOrDefault("inv").getBool(false): s &= "over "
+      s &= $l.getOrDefault("rate").getInt() & "/" & l.getOrDefault("per").getStr()
+      let burst = l.getOrDefault("burst").getInt()
+      if burst > 0: s &= " burst " & $burst & " packets"
+      return s
+    if "payload" in j:
+      let p = j["payload"]
+      return p.getOrDefault("protocol").getStr() & " " & p.getOrDefault("field").getStr()
+    if "meta" in j:
+      let m = j["meta"]
+      let key = m.getOrDefault("key").getStr()
+      case key
+      of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype": return key
+      else: return "meta " & key
+    if "ct" in j:
+      let c = j["ct"]
+      var s = "ct"
+      if "dir" in c: s &= " " & c["dir"].getStr()
+      s &= " " & c.getOrDefault("key").getStr()
+      return s
+    if "prefix" in j:
+      let p = j["prefix"]
+      return p.getOrDefault("addr").getStr() & "/" & $p.getOrDefault("len").getInt()
+    if "range" in j:
+      let r = j["range"]
+      if r.kind == JArray and r.len == 2:
+        return nftJsonToText(r[0]) & "-" & nftJsonToText(r[1])
+    if "concat" in j:
+      let c = j["concat"]
+      if c.kind == JArray:
+        var parts: seq[string]
+        for elem in c: parts.add nftJsonToText(elem)
+        return parts.join(" . ")
+    if "set" in j:
+      let s = j["set"]
+      if s.kind == JArray:
+        var parts: seq[string]
+        for elem in s: parts.add nftJsonToText(elem)
+        return "{ " & parts.join(", ") & " }"
+      elif s.kind == JString:
+        return "@" & s.getStr()
+    if "mangle" in j:
+      let m = j["mangle"]
+      return nftJsonToText(m.getOrDefault("key")) & " set " & nftJsonToText(m.getOrDefault("value"))
+    if "dnat" in j:
+      let d = j["dnat"]
+      var s = "dnat " & d.getOrDefault("family").getStr("ip") & " to " & d.getOrDefault("addr").getStr()
+      let port = d.getOrDefault("port").getInt()
+      if port > 0: s &= ":" & $port
+      return s
+    if "snat" in j:
+      let sn = j["snat"]
+      var s = "snat " & sn.getOrDefault("family").getStr("ip") & " to " & sn.getOrDefault("addr").getStr()
+      let port = sn.getOrDefault("port").getInt()
+      if port > 0: s &= ":" & $port
+      return s
+    if "masquerade" in j: return "masquerade"
+    # Fallback: render as compact JSON (better than nothing)
+    return $j
+  else:
+    return $j
+
+proc nftJsonCmdToText*(w: var Writer, j: JsonNode) =
+  ## Render a top-level nftables JSON command object as text.
+  if j == nil or j.kind != JObject: return
+  if "add" in j:
+    let add = j["add"]
+    if "chain" in add:
+      let c = add["chain"]
+      let name = c.getOrDefault("name").getStr()
+      w.braced("chain " & name):
+        if "type" in c:
+          let prio = c.getOrDefault("prio").getInt()
+          let hook = c.getOrDefault("hook").getStr()
+          let typ = c.getOrDefault("type").getStr()
+          let policy = c.getOrDefault("policy").getStr("accept")
+          w.line("type " & typ & " hook " & hook & " priority " & $prio & "; policy " & policy & ";")
+    if "rule" in add:
+      let r = add["rule"]
+      if "expr" in r and r["expr"].kind == JArray:
+        var parts: seq[string]
+        for expr in r["expr"]:
+          parts.add nftJsonToText(expr)
+        w.line(parts.join(" "))
+    if "set" in add:
+      let s = add["set"]
+      let name = s.getOrDefault("name").getStr()
+      w.braced("set " & name):
+        if "type" in s: w.line("type " & s["type"].getStr())
+        if "flags" in s and s["flags"].kind == JArray:
+          var flags: seq[string]
+          for f in s["flags"]: flags.add f.getStr()
+          w.line("flags " & flags.join(", "))
+
+# ---------------------------------------------------------------------------
 # Stmt → text
 # ---------------------------------------------------------------------------
 
@@ -117,14 +262,25 @@ proc emitStmt*(w: var Writer, s: Stmt) =
   of skMasquerade:
     w.add "masquerade"
     if s.masqPort > 0: w.add " to :" & $s.masqPort
+  of skRedirect:
+    w.add "redirect to :" & $s.redirectPort
   of skVmap:    w.add s.vmapKey.toMatchLeft & " vmap " & s.vmapData.toText
   of skMangle:  w.add s.mangleKey.toText & " set " & s.mangleValue.toText
   of skUpdate:
     w.add "update @" & s.updateSet & " { " & s.updateKey.toMatchLeft
     for sub in s.updateStmts: w.add " "; w.emitStmt(sub)
     w.add " }"
+  of skConnLimit:
+    w.add "ct count "
+    if s.connLimitFlags == "inverse": w.add "over "
+    w.add $s.connLimitCount
+  of skMssClamp:
+    if s.mssClampSize > 0:
+      w.add "tcp option maxseg size set " & $s.mssClampSize
+    else:
+      w.add "tcp option maxseg size set rt mtu"
   of skRaw:
-    w.add s.rawText
+    w.add nftJsonToText(s.rawJson)
 
 proc emitRuleLine(w: var Writer, stmts: seq[Stmt], comment: string) =
   w.addIndent()
@@ -166,7 +322,7 @@ proc emitText*(rs: NftRuleset): string =
   var sets: Table[TK, seq[NftSet]]
   var maps: Table[TK, seq[NftMap]]
 
-  var rawLines: Table[TK, seq[string]]
+  var rawJsonCmds: Table[TK, seq[JsonNode]]
 
   for cmd in rs.nftables:
     case cmd.kind
@@ -178,7 +334,6 @@ proc emitText*(rs: NftRuleset): string =
         if key notin chains:
           tableOrder.add key
           chains[key] = @[]; rules[key] = @[]; sets[key] = @[]; maps[key] = @[]
-          rawLines[key] = @[]
       of nakChain:
         let c = cmd.add.chain
         let key: TK = (c.family, c.table)
@@ -196,11 +351,11 @@ proc emitText*(rs: NftRuleset): string =
         let key: TK = (m.family, m.table)
         if key in maps: maps[key].add m
     of nckRaw:
-      # Associate raw lines with the most recently added table
+      # Associate raw JSON commands with the most recently added table
       if tableOrder.len > 0:
         let key = tableOrder[^1]
-        for line in cmd.rawLines:
-          rawLines[key].add line
+        for rawCmd in cmd.rawCmds:
+          rawJsonCmds.mgetOrPut(key, @[]).add rawCmd
     else: discard
 
   for key in tableOrder:
@@ -212,12 +367,11 @@ proc emitText*(rs: NftRuleset): string =
     w.emptyLine()
 
     w.braced("table " & tblId):
-      # Raw nftables lines (injected via fw:raw_nft)
-      let raws = rawLines.getOrDefault(key, @[])
-      if raws.len > 0:
+      # Raw nftables JSON commands (injected via fw:raw_nft)
+      let raws = rawJsonCmds.getOrDefault(key, @[])
+      for rawJ in raws:
         w.emptyLine()
-        for rawLine in raws:
-          w.line(rawLine)
+        w.nftJsonCmdToText(rawJ)
 
       for s in sets[key]:
         w.emptyLine()

@@ -3,7 +3,7 @@
 ## Each method is a LuaCFunction that retrieves FirewallState from the
 ## Lua registry and operates on it. setupLuaVM registers them all.
 
-import std/[os, options, tables]
+import std/[os, options, tables, json]
 import ./ffi
 import ./helpers
 import ../types
@@ -267,6 +267,9 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
       rule.proto = getStringArrayField(L, 5, "proto")
       rule.port = getStringArrayField(L, 5, "port")
       rule.saddrList = getStringField(L, 5, "saddr_list")
+      rule.daddrList = getStringField(L, 5, "daddr_list")
+      rule.macAddr = getStringField(L, 5, "mac")
+      rule.connLimit = getIntField(L, 5, "connlimit", 0)
       rule.log = getStringField(L, 5, "log")
 
       # Raw daddr (IP string for forward rules to specific destinations)
@@ -384,6 +387,7 @@ proc fwIplist(L: LuaState): cint {.cdecl.} =
     ipType: getStringField(L, 3, "type"),
     flags: getStringField(L, 3, "flags"),
     elements: getStringArrayField(L, 3, "elements"),
+    url: getStringField(L, 3, "url"),
     line: line,
   )
 
@@ -446,6 +450,59 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
   return 0
 
 # ---------------------------------------------------------------------------
+# fw:redirect({ iface = ..., proto = ..., port = ..., dest_port = ... })
+# ---------------------------------------------------------------------------
+
+proc fwRedirect(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  let line = getCurrentLine(L)
+  luaL_checktype(L, 2, LUA_TTABLE)
+
+  discard lua_getfield(L, 2, "iface")
+  if lua_isnoneornil(L, -1):
+    discard luaL_error(L, "fw:redirect: missing 'iface' field")
+  let ifaceEp = resolveEndpoint(L, state, -1)
+  lua_pop(L, 1)
+
+  let destPort = getIntField(L, 2, "dest_port", 0)
+  if destPort == 0:
+    discard luaL_error(L, "fw:redirect: missing 'dest_port' field")
+
+  var redir = RedirectRule(
+    iface: ifaceEp.zone,
+    proto: getStringArrayField(L, 2, "proto"),
+    port: getStringArrayField(L, 2, "port"),
+    destPort: destPort,
+    line: line,
+  )
+
+  if redir.proto.len == 0:
+    discard luaL_error(L, "fw:redirect: missing 'proto' field")
+
+  state.redirectRules.add redir
+  return 0
+
+# ---------------------------------------------------------------------------
+# fw:mss_clamp(chain?, size?)
+# ---------------------------------------------------------------------------
+
+proc fwMssClamp(L: LuaState): cint {.cdecl.} =
+  ## fw:mss_clamp()              -- clamp on forward chain, auto PMTUD
+  ## fw:mss_clamp("forward")     -- clamp on specific chain
+  ## fw:mss_clamp("forward", 1400) -- clamp to specific size (uncommon)
+  let state = getState(L)
+
+  var chain = "forward"
+  if lua_type(L, 2) == LUA_TSTRING:
+    chain = $lua_tostring(L, 2)
+
+  if chain notin ["forward", "output", "postrouting"]:
+    discard luaL_error(L, "fw:mss_clamp: chain must be forward/output/postrouting, got '%s'", chain.cstring)
+
+  state.mssClamp.add chain
+  return 0
+
+# ---------------------------------------------------------------------------
 # fw:hook({ pre_start = "...", post_start = "...", ... })
 # ---------------------------------------------------------------------------
 
@@ -495,15 +552,35 @@ proc fwChain(L: LuaState): cint {.cdecl.} =
   if priority == "":
     discard luaL_error(L, "fw:chain: missing 'priority' field (raw/mangle/filter/security/srcnat/dstnat or a number)")
 
-  let rawRules = getStringArrayField(L, 3, "rules")
-  if rawRules.len == 0:
-    discard luaL_error(L, "fw:chain: missing 'rules' field (array of nftables rule strings)")
+  # Rules: array of nftables JSON rule expr objects (Lua tables)
+  discard lua_getfield(L, 3, "rules")
+  if lua_isnoneornil(L, -1):
+    lua_pop(L, 1)
+    discard luaL_error(L, "fw:chain: missing 'rules' field (array of nftables JSON rule objects)")
+  if not lua_istable(L, -1):
+    lua_pop(L, 1)
+    discard luaL_error(L, "fw:chain: 'rules' must be a table (array of nftables JSON rule objects)")
+
+  let rulesLen = luaL_len(L, -1)
+  if rulesLen == 0:
+    lua_pop(L, 1)
+    discard luaL_error(L, "fw:chain: 'rules' must not be empty")
+
+  var rules: seq[JsonNode]
+  for i in 1..rulesLen:
+    discard lua_rawgeti(L, -1, i.clonglong)
+    if not lua_istable(L, -1):
+      lua_pop(L, 2)
+      discard luaL_error(L, "fw:chain: each rule must be a table (nftables JSON rule expr)")
+    rules.add luaToJson(L, -1)
+    lua_pop(L, 1)
+  lua_pop(L, 1)  # pop rules table
 
   state.customChains.add CustomChain(
     hook: hook,
     chainType: chainType,
     priority: priority,
-    rawRules: rawRules,
+    rules: rules,
     line: line,
   )
   return 0
@@ -513,13 +590,16 @@ proc fwChain(L: LuaState): cint {.cdecl.} =
 # ---------------------------------------------------------------------------
 
 proc fwRawNft(L: LuaState): cint {.cdecl.} =
+  ## Accept nftables JSON command objects as Lua tables.
+  ## Each argument should be a table representing a single nftables JSON command,
+  ## e.g. { add = { chain = { family = "inet", table = "matchstick", name = "my_chain" } } }
   let state = getState(L)
   let nargs = lua_gettop(L)
   for i in 2.cint .. nargs:
-    if lua_type(L, i) == LUA_TSTRING:
-      state.rawNft.add $lua_tostring(L, i)
+    if lua_istable(L, i):
+      state.rawNft.add luaToJson(L, i)
     else:
-      discard luaL_error(L, "fw:raw_nft: argument %d must be a string", i - 1)
+      discard luaL_error(L, "fw:raw_nft: argument %d must be a table (nftables JSON command object)", i - 1)
   return 0
 
 # ---------------------------------------------------------------------------
@@ -668,6 +748,8 @@ proc setupLuaVM*(L: LuaState, state: FirewallState, configFile: string) =
   registerMethod(L, -1, "docker", fwDocker)
   registerMethod(L, -1, "config", fwConfig)
   registerMethod(L, -1, "include", fwInclude)
+  registerMethod(L, -1, "redirect", fwRedirect)
+  registerMethod(L, -1, "mss_clamp", fwMssClamp)
   registerMethod(L, -1, "hook", fwHook)
   registerMethod(L, -1, "chain", fwChain)
   registerMethod(L, -1, "raw_nft", fwRawNft)

@@ -130,6 +130,8 @@ proc toJsonNode*(st: Stmt): JsonNode =
       return %*{"masquerade": {"port": st.masqPort}}
     else:
       return %*{"masquerade": newJNull()}
+  of skRedirect:
+    return %*{"redirect": {"port": st.redirectPort}}
   of skVmap:
     return %*{"vmap": {
       "key": st.vmapKey.toJsonNode(),
@@ -149,10 +151,18 @@ proc toJsonNode*(st: Stmt): JsonNode =
       "set": "@" & st.updateSet,
       "stmt": stmts
     }}
+  of skConnLimit:
+    var cl = %*{"val": st.connLimitCount}
+    if st.connLimitFlags == "inverse": cl["inv"] = newJBool(true)
+    return %*{"ct count": cl}
+  of skMssClamp:
+    if st.mssClampSize > 0:
+      return %*{"mangle": {"key": {"tcp option": {"name": "maxseg", "field": "size"}}, "value": st.mssClampSize}}
+    else:
+      return %*{"mangle": {"key": {"tcp option": {"name": "maxseg", "field": "size"}}, "value": {"rt": {"key": "mtu"}}}}
   of skRaw:
-    # Raw nftables statements can't be cleanly represented in JSON.
-    # Emit as a comment-like marker so it's visible but doesn't break schema.
-    return %*{"comment": st.rawText}
+    # Raw nftables JSON statement -- pass through directly
+    return st.rawJson
 
 # ---------------------------------------------------------------------------
 # NftMapElem → JsonNode
@@ -245,11 +255,11 @@ proc toJsonNode*(cmd: NftCmd): JsonNode =
     return %*{"delete": {cmd.deleteWhat: {
       "family": cmd.delete.family, "name": cmd.delete.name}}}
   of nckRaw:
-    # Raw nft lines can't be represented in nftables JSON schema.
-    # Emit as comments so they're visible but don't break parsing.
-    var arr = newJArray()
-    for line in cmd.rawLines: arr.add newJString(line)
-    return %*{"comment": {"raw_nft": arr}}
+    # Raw nftables JSON commands -- pass through directly
+    # Return the first one; the rest are handled by the ruleset emitter
+    if cmd.rawCmds.len > 0:
+      return cmd.rawCmds[0]
+    return newJNull()
 
 # ---------------------------------------------------------------------------
 # NftRuleset → JsonNode
@@ -257,7 +267,13 @@ proc toJsonNode*(cmd: NftCmd): JsonNode =
 
 proc toJsonNode*(rs: NftRuleset): JsonNode =
   var arr = newJArray()
-  for cmd in rs.nftables: arr.add cmd.toJsonNode()
+  for cmd in rs.nftables:
+    if cmd.kind == nckRaw:
+      # Raw commands may contain multiple JSON command objects
+      for rawCmd in cmd.rawCmds:
+        arr.add rawCmd
+    else:
+      arr.add cmd.toJsonNode()
   return %*{"nftables": arr}
 
 # ---------------------------------------------------------------------------

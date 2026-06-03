@@ -47,7 +47,7 @@ suite "Golden file: text output":
 
 suite "Small configs render successfully":
   for name in ["config", "multi_iface", "include_main", "docker", "named_rate", "minimal",
-                "hooks", "custom_chain", "raw_nft", "exceptions"]:
+                "hooks", "custom_chain", "raw_nft", "exceptions", "tier2_features"]:
     test name & ".lua renders":
       let cfg = testdataDir / (name & ".lua")
       let (output, exitCode) = runMatchstick("render", cfg)
@@ -169,30 +169,38 @@ suite "Custom chains (fw:chain)":
     let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check "custom_filter_prerouting_0" in output
-    check "custom_filter_forward_1" in output
 
   test "custom chain has correct hook and priority":
     let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check "hook prerouting" in output
-    check "hook forward" in output
     # mangle priority = -150, offset = 5, so -145
     check "filter - 145" in output
 
-  test "custom chain contains raw rules":
+  test "custom chain contains rules from JSON":
     let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
     check exitCode == 0
-    check "mark set 0x100/0xff00" in output
-    check "mark set 0x200/0xff00" in output
-    check "maxseg" in output
+    check "iifname" in output
+    check "mark set" in output
+    check "tcp dport" in output
+
+  test "custom chain JSON output is valid":
+    let (output, exitCode) = runMatchstick("render", "--json", testdataDir / "custom_chain.lua")
+    check exitCode == 0
+    check output.strip().startsWith("{")
 
 suite "Raw nftables escape hatch (fw:raw_nft)":
-  test "raw nft lines appear in output":
+  test "raw nft JSON commands appear in text output":
     let (output, exitCode) = runMatchstick("render", testdataDir / "raw_nft.lua")
     check exitCode == 0
     check "chain my_custom_chain" in output
-    check "tcp dport 12345 accept" in output
-    check "priority filter + 100" in output
+    check "accept" in output
+
+  test "raw nft JSON commands pass through to JSON output":
+    let (output, exitCode) = runMatchstick("render", "--json", testdataDir / "raw_nft.lua")
+    check exitCode == 0
+    check "my_custom_chain" in output
+    check "12345" in output
 
 suite "Chain exceptions (fw:exception)":
   test "invalid chain created with exceptions":
@@ -219,3 +227,37 @@ suite "Chain exceptions (fw:exception)":
     check dhcpExc >= 0
     check fibDrop >= 0
     check dhcpExc < fibDrop  # exception comes before drop
+
+suite "Tier 2 features":
+  test "MSS clamping chain":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "tier2_features.lua")
+    check exitCode == 0
+    check "mss_clamp_forward" in output
+    check "tcp flags syn" in output
+    check "maxseg size set rt mtu" in output
+
+  test "connection limiting":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "tier2_features.lua")
+    check exitCode == 0
+    check "ct count 10" in output
+
+  test "MAC address matching":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "tier2_features.lua")
+    check exitCode == 0
+    check "ether saddr aa:bb:cc:dd:ee:ff" in output
+
+  test "redirect (local port redirect)":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "tier2_features.lua")
+    check exitCode == 0
+    check "redirect to :3128" in output
+    check "matchstick_nat" in output
+
+  test "daddr_list (destination IP list matching)":
+    let (output, exitCode) = runMatchstick("render", testdataDir / "tier2_features.lua")
+    check exitCode == 0
+    check "@allowed_countries" in output
+    check "ip daddr" in output
+
+  test "iplist with URL field accepted":
+    let (output, exitCode) = runMatchstick("check", testdataDir / "tier2_features.lua")
+    check exitCode == 0

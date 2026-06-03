@@ -8,7 +8,7 @@
 ## avoids `Option[T] = none` rendering as `"field": null` (which nftables JSON
 ## rejects).
 
-import std/[strutils, algorithm]
+import std/[strutils, algorithm, json]
 
 type
   # =========================================================================
@@ -87,7 +87,8 @@ type
   StmtKind* = enum
     skMatch, skAccept, skDrop, skReject, skReturn,
     skJump, skGoto, skCounter, skLog, skLimit,
-    skDnat, skSnat, skMasquerade, skVmap, skMangle, skUpdate,
+    skDnat, skSnat, skMasquerade, skRedirect, skVmap, skMangle, skUpdate,
+    skConnLimit, skMssClamp,
     skRaw
 
   Stmt* = ref object
@@ -126,6 +127,9 @@ type
       snatFamily*: string
     of skMasquerade:
       masqPort*: int
+    of skRedirect:
+      redirectPort*: int
+      redirectFamily*: string
     of skVmap:
       vmapKey*: Expr
       vmapData*: Expr
@@ -136,8 +140,13 @@ type
       updateSet*: string
       updateKey*: Expr
       updateStmts*: seq[Stmt]
+    of skConnLimit:
+      connLimitCount*: int
+      connLimitFlags*: string     ## "inverse" or "" for normal
+    of skMssClamp:
+      mssClampSize*: int          ## 0 = use "rt mtu" (PMTUD)
     of skRaw:
-      rawText*: string
+      rawJson*: JsonNode          ## nftables JSON statement object
 
   # =========================================================================
   # Top-level objects
@@ -237,7 +246,7 @@ type
     of nckMetainfo:
       metainfo*: NftMetainfo
     of nckRaw:
-      rawLines*: seq[string]
+      rawCmds*: seq[JsonNode]     ## nftables JSON command objects
 
   NftRuleset* = object
     nftables*: seq[NftCmd]
@@ -292,7 +301,10 @@ proc masqueradeStmt*(port = 0): Stmt = Stmt(kind: skMasquerade, masqPort: port)
 proc vmapStmt*(key, data: Expr): Stmt = Stmt(kind: skVmap, vmapKey: key, vmapData: data)
 proc updateStmt*(setName: string, key: Expr, stmts: seq[Stmt]): Stmt = Stmt(kind: skUpdate, updateSet: setName, updateKey: key, updateStmts: stmts)
 proc counterStmt*(name = ""): Stmt = Stmt(kind: skCounter, counterName: name)
-proc rawStmt*(text: string): Stmt = Stmt(kind: skRaw, rawText: text)
+proc redirectStmt*(port: int, family = "ip"): Stmt = Stmt(kind: skRedirect, redirectPort: port, redirectFamily: family)
+proc connLimitStmt*(count: int, flags = ""): Stmt = Stmt(kind: skConnLimit, connLimitCount: count, connLimitFlags: flags)
+proc mssClampStmt*(size = 0): Stmt = Stmt(kind: skMssClamp, mssClampSize: size)
+proc rawStmt*(j: JsonNode): Stmt = Stmt(kind: skRaw, rawJson: j)
 
 # ---------------------------------------------------------------------------
 # Convenience constructors for top-level commands
@@ -341,5 +353,5 @@ proc deleteTable*(family, name: string): NftCmd =
 proc metainfoCmd*(): NftCmd =
   NftCmd(kind: nckMetainfo, metainfo: NftMetainfo(json_schema_version: 1))
 
-proc rawCmd*(lines: seq[string]): NftCmd =
-  NftCmd(kind: nckRaw, rawLines: lines)
+proc rawCmd*(cmds: seq[JsonNode]): NftCmd =
+  NftCmd(kind: nckRaw, rawCmds: cmds)

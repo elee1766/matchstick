@@ -61,7 +61,7 @@ type
     ipv4Only, ipv6Only: bool
 
 proc buildServiceRules(state: FirewallState, svc: Service, action: Action,
-                       saddrStmts, daddrStmts: seq[Stmt],
+                       saddrStmts, daddrStmts, extraStmts: seq[Stmt],
                        forceV4, forceV6: bool): seq[BuiltRule] =
   for entry in svc.entries:
     var stmts: seq[Stmt]
@@ -77,12 +77,17 @@ proc buildServiceRules(state: FirewallState, svc: Service, action: Action,
       v6 = true
     else:
       stmts.add matchStmt(opEq, payloadExpr(entry.proto, "dport"), parsePortExpr(entry.port))
+    stmts.add extraStmts
     stmts.add actionToStmt(action)
     result.add BuiltRule(stmts: stmts, ipv4Only: v4, ipv6Only: v6)
 
 proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
-  var saddrStmts, daddrStmts: seq[Stmt]
+  var saddrStmts, daddrStmts, extraStmts: seq[Stmt]
   var v4, v6 = false
+
+  # MAC address match
+  if rule.macAddr != "":
+    saddrStmts.add matchStmt(opEq, payloadExpr("ether", "saddr"), strExpr(rule.macAddr))
 
   if rule.saddrList != "":
     if rule.saddrList in state.ipLists:
@@ -114,8 +119,22 @@ proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
       daddrStmts.add matchStmt(opEq, payloadExpr("ip6", "daddr"), strExpr(rule.daddrRaw))
       v6 = true
 
+  if rule.daddrList != "":
+    if rule.daddrList in state.ipLists:
+      let ipl = state.ipLists[rule.daddrList]
+      if ipl.ipType == "ipv4":
+        daddrStmts.add matchStmt(opEq, payloadExpr("ip", "daddr"), setRef(rule.daddrList))
+        v4 = true
+      else:
+        daddrStmts.add matchStmt(opEq, payloadExpr("ip6", "daddr"), setRef(rule.daddrList))
+        v6 = true
+
+  # Connection limit
+  if rule.connLimit > 0:
+    extraStmts.add connLimitStmt(rule.connLimit)
+
   if rule.service.isSome:
-    return buildServiceRules(state, rule.service.get, rule.action, saddrStmts, daddrStmts, v4, v6)
+    return buildServiceRules(state, rule.service.get, rule.action, saddrStmts, daddrStmts, extraStmts, v4, v6)
 
   if rule.proto.len > 0:
     let portExprs = rule.port.mapIt(parsePortExpr(it))
@@ -134,12 +153,14 @@ proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
         rv6 = true
       else:
         if portExpr != nil: stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExpr)
+      stmts.add extraStmts
       stmts.add actionToStmt(rule.action)
       result.add BuiltRule(stmts: stmts, ipv4Only: rv4, ipv6Only: rv6)
     return
 
   var stmts: seq[Stmt]
   stmts.add saddrStmts; stmts.add daddrStmts
+  stmts.add extraStmts
   stmts.add actionToStmt(rule.action)
   result.add BuiltRule(stmts: stmts, ipv4Only: v4, ipv6Only: v6)
 
@@ -468,11 +489,11 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     cmds.add addRule(fam, tn, cn6, @[actionToStmt(polAction)])
 
   # NAT table
-  if state.dnatRules.len > 0 or state.snatRules.len > 0:
+  if state.dnatRules.len > 0 or state.snatRules.len > 0 or state.redirectRules.len > 0:
     let natTn = tn & "_nat"
     cmds.add addTable(fam, natTn)
 
-    if state.dnatRules.len > 0:
+    if state.dnatRules.len > 0 or state.redirectRules.len > 0:
       cmds.add addBaseChain(fam, natTn, "prerouting", "nat", "prerouting", priorityVal(-100, offset), "accept")
       for dnat in state.dnatRules:
         var entries: seq[ServiceEntry]
@@ -490,6 +511,20 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
             stmts.add matchStmt(opEq, payloadExpr(entry.proto, "dport"), parsePortExpr(entry.port))
           let family = if isIpv4(dnat.dest): "ip" else: "ip6"
           stmts.add dnatStmt(dnat.dest, dnat.destPort, family)
+          cmds.add addRule(fam, natTn, "prerouting", stmts)
+
+      # Redirect rules (local port redirect)
+      for redir in state.redirectRules:
+        for proto in redir.proto:
+          var stmts: seq[Stmt]
+          for iface in redir.iface.interfaces:
+            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(iface))
+          let portExprs = redir.port.mapIt(parsePortExpr(it))
+          if portExprs.len == 1:
+            stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExprs[0])
+          elif portExprs.len > 1:
+            stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), sortedAnonSetExpr(portExprs))
+          stmts.add redirectStmt(redir.destPort)
           cmds.add addRule(fam, natTn, "prerouting", stmts)
 
     if state.snatRules.len > 0:
@@ -511,15 +546,24 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
           stmts.add snatStmt(snat.addr4, family = family)
         cmds.add addRule(fam, natTn, "postrouting", stmts)
 
+  # MSS clamping
+  for chainTarget in state.mssClamp:
+    let mssChainName = "mss_clamp_" & chainTarget
+    cmds.add addBaseChain(fam, tn, mssChainName, "filter", chainTarget, priorityVal(-150, offset), "accept")
+    cmds.add addRule(fam, tn, mssChainName, @[
+      matchStmt(opEq, payloadExpr("tcp", "flags"), strExpr("syn")),
+      mssClampStmt(0),  # 0 = use PMTUD (rt mtu)
+    ])
+
   # Custom chains (fw:chain)
   for i, cc in state.customChains:
     let prio = resolvePriority(cc.priority, offset)
     let cn = customChainName(cc.hook, cc.chainType, cc.priority, i)
     cmds.add addBaseChain(fam, tn, cn, cc.chainType, cc.hook, prio, "accept")
-    for rawRule in cc.rawRules:
-      cmds.add addRule(fam, tn, cn, @[rawStmt(rawRule)])
+    for ruleJson in cc.rules:
+      cmds.add addRule(fam, tn, cn, @[rawStmt(ruleJson)])
 
-  # Raw nftables lines (fw:raw_nft) -- injected verbatim into the main table
+  # Raw nftables JSON commands (fw:raw_nft) -- injected into the ruleset
   if state.rawNft.len > 0:
     cmds.add rawCmd(state.rawNft)
 

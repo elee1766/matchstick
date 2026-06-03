@@ -134,7 +134,7 @@ suite "Custom chain validation":
   test "invalid hook name rejected":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
-      fw:chain("badhook", { type = "filter", priority = "mangle", rules = { "accept" } })
+      fw:chain("badhook", { type = "filter", priority = "mangle", rules = { { { accept = {} } } } })
     """)
     check exitCode == 1
     check "hook must be" in output
@@ -142,7 +142,7 @@ suite "Custom chain validation":
   test "invalid chain type rejected":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
-      fw:chain("prerouting", { type = "badtype", priority = "mangle", rules = { "accept" } })
+      fw:chain("prerouting", { type = "badtype", priority = "mangle", rules = { { { accept = {} } } } })
     """)
     check exitCode == 1
     check "type must be" in output
@@ -158,7 +158,7 @@ suite "Custom chain validation":
   test "valid custom chain passes":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
-      fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { "accept" } })
+      fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { { { accept = {} } } } })
     """)
     check exitCode == 0
 
@@ -188,18 +188,18 @@ suite "Exception validation":
     check exitCode == 0
 
 suite "Raw nft validation":
-  test "non-string argument rejected":
+  test "non-table argument rejected":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
       fw:raw_nft(42)
     """)
     check exitCode == 1
-    check "string" in output
+    check "table" in output
 
   test "valid raw nft passes":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
-      fw:raw_nft("chain my_chain { }")
+      fw:raw_nft({ add = { chain = { family = "inet", table = "matchstick", name = "test" } } })
     """)
     check exitCode == 0
 
@@ -208,5 +208,47 @@ suite "Hook configuration":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
       fw:hook({ pre_start = "echo hello", post_start = "echo world" })
+    """)
+    check exitCode == 0
+
+suite "Redirect validation":
+  test "missing iface rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:redirect({ proto = "tcp", port = { 80 }, dest_port = 3128 })
+    """)
+    check exitCode == 1
+    check "iface" in output
+
+  test "missing dest_port rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      local lan = fw:zone("lan", "eth0")
+      fw:redirect({ iface = lan, proto = "tcp", port = { 80 } })
+    """)
+    check exitCode == 1
+    check "dest_port" in output
+
+  test "valid redirect passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      local lan = fw:zone("lan", "eth0")
+      fw:redirect({ iface = lan, proto = "tcp", port = { 80 }, dest_port = 3128 })
+    """)
+    check exitCode == 0
+
+suite "MSS clamp validation":
+  test "invalid chain rejected":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:mss_clamp("input")
+    """)
+    check exitCode == 1
+    check "chain must be" in output
+
+  test "valid mss_clamp passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:mss_clamp("forward")
     """)
     check exitCode == 0

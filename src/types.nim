@@ -1,7 +1,7 @@
 ## Core types for matchstick's internal state.
 ## These are populated by the Lua VM callbacks and consumed by the renderer.
 
-import std/[tables, options]
+import std/[tables, options, json]
 
 type
   Action* = enum
@@ -69,7 +69,10 @@ type
     proto*: seq[string]        ## raw protocol(s) if no service
     port*: seq[string]         ## raw port(s) if no service
     saddrList*: string         ## iplist reference (empty = none)
+    daddrList*: string         ## iplist reference for daddr (empty = none)
     daddrRaw*: string          ## raw destination IP (for forward rules to specific IPs)
+    macAddr*: string           ## MAC address match (empty = none)
+    connLimit*: int            ## max concurrent connections (0 = no limit)
     rate*: Option[RateLimit]
     log*: string               ## log prefix (empty = no log)
     line*: int
@@ -99,6 +102,13 @@ type
     destPort*: int             ## port remap (0 = same port)
     line*: int
 
+  RedirectRule* = ref object
+    iface*: Zone               ## incoming interface zone
+    proto*: seq[string]
+    port*: seq[string]         ## incoming port(s) to match
+    destPort*: int             ## local port to redirect to
+    line*: int
+
   SnatRule* = ref object
     fromNet*: string           ## source subnet
     daddr*: string             ## destination match (empty = any)
@@ -118,6 +128,7 @@ type
     ipType*: string            ## "ipv4" or "ipv6"
     flags*: string             ## "timeout", "interval", etc.
     elements*: seq[string]     ## static elements (may be empty for dynamic)
+    url*: string               ## URL for auto-refresh (empty = no refresh)
     line*: int
 
   # ------------------------------------------------------------------
@@ -155,7 +166,7 @@ type
     hook*: string              ## "prerouting" | "postrouting" | "forward" | "input" | "output"
     chainType*: string         ## "filter" | "nat" | "route"
     priority*: string          ## "mangle" | "raw" | numeric, resolved at build time
-    rawRules*: seq[string]     ## raw nftables rule lines
+    rules*: seq[JsonNode]      ## nftables JSON rule expr arrays
     line*: int
 
   # ------------------------------------------------------------------
@@ -211,12 +222,14 @@ type
     rules*: seq[Rule]
     dnatRules*: seq[DnatRule]
     snatRules*: seq[SnatRule]
+    redirectRules*: seq[RedirectRule]
+    mssClamp*: seq[string]         ## chain names to apply MSS clamping ("forward", "output")
     ipLists*: OrderedTable[string, IpList]
     dhcp*: seq[DhcpConfig]
     docker*: Option[DockerConfig]
     hooks*: HookConfig
     customChains*: seq[CustomChain]
-    rawNft*: seq[string]           ## raw nftables lines injected into the table
+    rawNft*: seq[JsonNode]         ## nftables JSON command objects injected into the ruleset
     chainExceptions*: seq[ChainException]
     ## Unified name registry -- all zone and host names.
     ## Used to detect collisions.

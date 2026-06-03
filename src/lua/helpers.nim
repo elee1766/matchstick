@@ -3,7 +3,7 @@
 ## Provides: state/config registry access, Lua argument readers,
 ## handle push, endpoint/service/host resolution, action parsing.
 
-import std/[options, tables, strutils]
+import std/[options, tables, strutils, json]
 import ./ffi
 import ../types
 
@@ -214,3 +214,61 @@ proc resolveHostAddr*(L: LuaState, state: FirewallState, idx: cint): string =
       if name in state.hosts:
         return state.hosts[name].addr4
   discard luaL_error(L, "expected host handle or IP string")
+
+# ---------------------------------------------------------------------------
+# Helpers: convert Lua values to JsonNode
+# ---------------------------------------------------------------------------
+
+proc luaToJson*(L: LuaState, idx: cint, depth: int = 0): JsonNode =
+  ## Convert a Lua value at stack index `idx` to a JsonNode.
+  ## Supports: nil, bool, int, float, string, table (array or object).
+  if depth > 50:
+    return newJNull()  # prevent infinite recursion
+
+  let absIdx = lua_absindex(L, idx)
+  let t = lua_type(L, absIdx)
+
+  case t
+  of LUA_TNIL, LUA_TNONE:
+    return newJNull()
+  of LUA_TBOOLEAN:
+    return newJBool(lua_toboolean(L, absIdx) != 0)
+  of LUA_TNUMBER:
+    if lua_isinteger(L, absIdx) != 0:
+      return newJInt(int(lua_tointeger(L, absIdx)))
+    else:
+      return newJFloat(lua_tonumber(L, absIdx))
+  of LUA_TSTRING:
+    return newJString($lua_tostring(L, absIdx))
+  of LUA_TTABLE:
+    # Determine if this is an array (sequential integer keys from 1) or an object
+    let len = luaL_len(L, absIdx)
+    if len > 0:
+      # Check if key 1 exists -- if so, treat as array
+      discard lua_rawgeti(L, absIdx, 1)
+      let hasKey1 = lua_type(L, -1) != LUA_TNIL
+      lua_pop(L, 1)
+      if hasKey1:
+        var arr = newJArray()
+        for i in 1..len:
+          discard lua_rawgeti(L, absIdx, i.clonglong)
+          arr.add luaToJson(L, -1, depth + 1)
+          lua_pop(L, 1)
+        return arr
+
+    # Object (string keys)
+    var obj = newJObject()
+    lua_pushnil(L)
+    while lua_next(L, absIdx) != 0:
+      # key at -2, value at -1
+      if lua_type(L, -2) == LUA_TSTRING:
+        let key = $lua_tostring(L, -2)
+        obj[key] = luaToJson(L, -1, depth + 1)
+      elif lua_isinteger(L, -2) != 0:
+        # Integer key in object context: use string representation
+        let key = $lua_tointeger(L, -2)
+        obj[key] = luaToJson(L, -1, depth + 1)
+      lua_pop(L, 1)  # pop value, keep key for next iteration
+    return obj
+  else:
+    return newJNull()
