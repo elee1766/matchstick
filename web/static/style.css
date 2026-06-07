@@ -69,8 +69,8 @@ main { flex: 1; }
 /* Playground */
 .playground { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-top: 1em; }
 @media (max-width: 768px) { .playground { grid-template-columns: 1fr; } }
-.playground textarea { width: 100%; font-family: var(--mono); font-size: 0.85rem; background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75em; resize: vertical; tab-size: 2; }
-.playground pre { height: 100%; min-height: 300px; margin: 0; }
+.playground textarea { width: 100%; font-family: var(--mono); font-size: 0.85rem; background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75em; resize: vertical; tab-size: 2; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+.playground pre { max-height: 70vh; min-height: 300px; margin: 0; overflow: auto; }
 .controls { display: flex; gap: 0.5em; margin-top: 0.5em; align-items: center; }
 .controls select { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.4em; font-size: 0.85rem; }
 

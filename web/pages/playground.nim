@@ -29,7 +29,7 @@ proc playgroundPage*(): string =
     tdiv(class="playground"):
       tdiv(class="playground-editor"):
         h3: text "firewall.lua"
-        textarea(id="config-input", rows="20", spellcheck="false"):
+        textarea(id="config-input", rows="20", spellcheck="false", autocomplete="off", autocorrect="off", autocapitalize="off"):
           text defaultConfig
         tdiv(class="controls"):
           button(id="btn-render", class="btn"): text "Render"
