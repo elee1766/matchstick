@@ -1,0 +1,17 @@
+[Unit]
+Description=matchstick nftables firewall
+Documentation=https://github.com/elee1766/matchstick
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
+ExecReload=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
+ExecStop=/usr/bin/nft delete table inet matchstick ; /usr/bin/nft delete table inet matchstick_nat
+
+[Install]
+WantedBy=multi-user.target

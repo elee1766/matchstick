@@ -1,5 +1,6 @@
 # Build output
-matchstick
+/matchstick
+/src/matchstick
 nimcache/
 nimblecache/
 
