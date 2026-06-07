@@ -2,9 +2,7 @@
 
 [![CI](https://github.com/elee1766/matchstick/actions/workflows/ci.yml/badge.svg)](https://github.com/elee1766/matchstick/actions/workflows/ci.yml)
 
-Lua-based nftables firewall configuration tool. Write your firewall as Lua code, get nftables rules out.
-
-Inspired by Shorewall and foomuuri. Built with Nim + statically-compiled Lua 5.4.
+shorewall-like irewall config tool for lua. Built with Nim + statically-compiled Lua 5.4.
 
 ## Example
 
