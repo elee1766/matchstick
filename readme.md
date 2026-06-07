@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/elee1766/matchstick/actions/workflows/ci.yml/badge.svg)](https://github.com/elee1766/matchstick/actions/workflows/ci.yml)
 
-shorewall-like irewall config tool for lua. Built with Nim + statically-compiled Lua 5.4.
+shorewall-like firewall config tool that uses lua.
+
+meant to hopefully replace shorewall for me.
 
 ## Example
 
