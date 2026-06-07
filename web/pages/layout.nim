@@ -8,6 +8,7 @@ proc layout*(title: string, content: VNode): string =
       meta(charset="utf-8")
       meta(name="viewport", content="width=device-width, initial-scale=1")
       title: text title & " - matchstick"
+      link(rel="stylesheet", href="/static/tux.css")
       link(rel="stylesheet", href="/static/style.css")
     body:
       nav(class="nav"):
