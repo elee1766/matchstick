@@ -130,25 +130,25 @@ proc deriveSysctls*(state: FirewallState): SysctlSet =
 
   result = SysctlSet(entries: filtered)
 
-proc applySysctls*(sysctls: SysctlSet): seq[string] =
-  ## Write sysctl values to /proc/sys/. Returns list of errors (empty = success).
-  var errors: seq[string]
-  for entry in sysctls.entries:
-    if not isValidSysctlKey(entry.key):
-      errors.add entry.key & ": invalid sysctl key (must be alphanumeric with dots)"
-      continue
-    let path = "/proc/sys/" & entry.key.replace('.', '/')
-    # Final safety check: resolved path must be under /proc/sys/
-    if ".." in path:
-      errors.add entry.key & ": path traversal detected"
-      continue
-    try:
-      writeFile(path, entry.value & "\n")
-    except IOError as e:
-      errors.add entry.key & " = " & entry.value & ": " & e.msg
-    except OSError as e:
-      errors.add entry.key & " = " & entry.value & ": " & e.msg
-  return errors
+when not defined(noSystem):
+  proc applySysctls*(sysctls: SysctlSet): seq[string] =
+    ## Write sysctl values to /proc/sys/. Returns list of errors (empty = success).
+    var errors: seq[string]
+    for entry in sysctls.entries:
+      if not isValidSysctlKey(entry.key):
+        errors.add entry.key & ": invalid sysctl key (must be alphanumeric with dots)"
+        continue
+      let path = "/proc/sys/" & entry.key.replace('.', '/')
+      if ".." in path:
+        errors.add entry.key & ": path traversal detected"
+        continue
+      try:
+        writeFile(path, entry.value & "\n")
+      except IOError as e:
+        errors.add entry.key & " = " & entry.value & ": " & e.msg
+      except OSError as e:
+        errors.add entry.key & " = " & entry.value & ": " & e.msg
+    return errors
 
 proc formatSysctls*(sysctls: SysctlSet): string =
   ## Format sysctls for display (check/render output).

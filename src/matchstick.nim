@@ -1,7 +1,6 @@
 ## matchstick - Lua-based nftables firewall configuration tool
 
 import std/[os, strformat, options, tables, parseopt, strutils]
-import experimental/diff
 import ./lua/ffi
 import ./types
 import ./lua/api
@@ -10,9 +9,12 @@ import ./emit_text
 import ./emit_json
 import ./validate
 import ./show
-import ./nftables_ffi
 import ./sysctl
 import ./import_ufw
+
+when not defined(noSystem):
+  import experimental/diff
+  import ./nftables_ffi
 
 const
   defaultConfigPaths = [
@@ -30,11 +32,14 @@ proc usage() =
 Usage:
   matchstick check  [config.lua]                    Validate config
   matchstick render [config.lua]                    Print nftables text
-  matchstick render --json [config.lua]             Print nftables JSON
-  matchstick apply  [config.lua]                    Apply to kernel
-  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes
-  matchstick diff   [config.lua]                    Diff running vs generated
+  matchstick render --json [config.lua]             Print nftables JSON"""
 
+  when not defined(noSystem):
+    stderr.writeLine """  matchstick apply  [config.lua]                    Apply to kernel
+  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes
+  matchstick diff   [config.lua]                    Diff running vs generated"""
+
+  stderr.writeLine """
   matchstick show matrix   [config.lua]             Zone policy matrix
   matchstick show rules    [config.lua] <src> <dst> Rules for zone pair
   matchstick show topology [config.lua]             Topology diagram
@@ -171,7 +176,7 @@ proc requireConfig(opts: CliOpts) =
     quit(1)
 
 # ---------------------------------------------------------------------------
-# Commands
+# Commands: always available (pure computation)
 # ---------------------------------------------------------------------------
 
 proc cmdCheck(opts: CliOpts) =
@@ -197,115 +202,6 @@ proc cmdRender(opts: CliOpts) =
     stdout.write emitJson(ruleset)
   else:
     stdout.write emitText(ruleset)
-
-proc cmdApply(opts: CliOpts) =
-  let state = loadConfig(opts.configFile)
-  let ok = runValidation(state)
-  if not ok:
-    stderr.writeLine "error: config has validation errors, refusing to apply"
-    quit(1)
-  let ruleset = buildRuleset(state)
-  let text = emitText(ruleset)
-
-  stderr.writeLine "validating..."
-  let valResult = nftValidate(text)
-  if not valResult.success:
-    stderr.writeLine "error: nftables validation failed:"
-    stderr.writeLine valResult.error
-    quit(1)
-
-  # Apply sysctl settings (before loading nftables rules)
-  if not opts.noSysctl:
-    let sysctls = deriveSysctls(state)
-    if sysctls.entries.len > 0:
-      stderr.writeLine "applying " & $sysctls.entries.len & " sysctl settings..."
-      let errors = applySysctls(sysctls)
-      for e in errors:
-        stderr.writeLine "warning: sysctl: " & e
-  else:
-    stderr.writeLine "skipping sysctl (--no-sysctl)"
-
-  if state.hooks.preStart != "":
-    stderr.writeLine "running pre_start hook..."
-    let hookResult = execShellCmd(state.hooks.preStart)
-    if hookResult != 0:
-      stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
-
-  stderr.writeLine "applying..."
-  let applyResult = nftApply(text)
-  if not applyResult.success:
-    stderr.writeLine "error: nftables apply failed:"
-    stderr.writeLine applyResult.error
-    quit(1)
-
-  if state.hooks.postStart != "":
-    stderr.writeLine "running post_start hook..."
-    let hookResult = execShellCmd(state.hooks.postStart)
-    if hookResult != 0:
-      stderr.writeLine "warning: post_start hook exited with code " & $hookResult
-
-  echo "ok: rules applied"
-
-proc unifiedDiff(a, b: string, labelA = "running", labelB = "generated", context = 3): string =
-  ## Produce unified diff output in memory.
-  let linesA = a.splitLines()
-  let linesB = b.splitLines()
-  let items = diffText(a, b)
-
-  if items.len == 0: return ""
-
-  result.add "--- " & labelA & "\n"
-  result.add "+++ " & labelB & "\n"
-
-  for item in items:
-    # Context window around this change
-    let startA = max(0, item.startA - context)
-    let startB = max(0, item.startB - context)
-    let endA = min(linesA.len, item.startA + item.deletedA + context)
-    let endB = min(linesB.len, item.startB + item.insertedB + context)
-    let countA = endA - startA
-    let countB = endB - startB
-
-    result.add &"@@ -{startA + 1},{countA} +{startB + 1},{countB} @@\n"
-
-    # Leading context
-    for i in startA ..< item.startA:
-      result.add " " & linesA[i] & "\n"
-    # Deletions
-    for i in item.startA ..< item.startA + item.deletedA:
-      result.add "-" & linesA[i] & "\n"
-    # Insertions
-    for i in item.startB ..< item.startB + item.insertedB:
-      result.add "+" & linesB[i] & "\n"
-    # Trailing context
-    for i in item.startA + item.deletedA ..< endA:
-      result.add " " & linesA[i] & "\n"
-
-proc cmdDiff(opts: CliOpts) =
-  let state = loadConfig(opts.configFile)
-  discard runValidation(state)
-  let ruleset = buildRuleset(state)
-  let generated = emitText(ruleset)
-
-  let tn = state.config.tableName
-  let currentFilter = nftListTable("inet", tn)
-  let currentNat = nftListTable("inet", tn & "_nat")
-
-  var running = ""
-  if currentFilter.success: running &= currentFilter.output
-  if currentNat.success: running &= currentNat.output
-
-  if running == "":
-    stderr.writeLine "note: no running matchstick tables found (table inet " & tn & ")"
-    echo "--- (no running rules)"
-    echo "+++ (generated)"
-    echo generated
-  else:
-    let d = unifiedDiff(running, generated)
-    if d == "":
-      echo "no differences"
-    else:
-      stdout.write d
 
 proc cmdShow(opts: CliOpts) =
   let state = loadConfig(opts.configFile)
@@ -337,16 +233,124 @@ proc cmdShow(opts: CliOpts) =
     stderr.writeLine "error: unknown show subcommand: " & opts.showSub
     usage()
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 proc cmdImportUfw() =
   let input = stdin.readAll()
   if input.strip() == "":
     stderr.writeLine "error: no input. Usage: sudo ufw show added | matchstick import-ufw"
     quit(1)
   stdout.write importUfw(input)
+
+# ---------------------------------------------------------------------------
+# Commands: system-only (require nft binary, root, /proc)
+# ---------------------------------------------------------------------------
+
+when not defined(noSystem):
+  proc cmdApply(opts: CliOpts) =
+    let state = loadConfig(opts.configFile)
+    let ok = runValidation(state)
+    if not ok:
+      stderr.writeLine "error: config has validation errors, refusing to apply"
+      quit(1)
+    let ruleset = buildRuleset(state)
+    let text = emitText(ruleset)
+
+    stderr.writeLine "validating..."
+    let valResult = nftValidate(text)
+    if not valResult.success:
+      stderr.writeLine "error: nftables validation failed:"
+      stderr.writeLine valResult.error
+      quit(1)
+
+    # Apply sysctl settings (before loading nftables rules)
+    if not opts.noSysctl:
+      let sysctls = deriveSysctls(state)
+      if sysctls.entries.len > 0:
+        stderr.writeLine "applying " & $sysctls.entries.len & " sysctl settings..."
+        let errors = applySysctls(sysctls)
+        for e in errors:
+          stderr.writeLine "warning: sysctl: " & e
+    else:
+      stderr.writeLine "skipping sysctl (--no-sysctl)"
+
+    if state.hooks.preStart != "":
+      stderr.writeLine "running pre_start hook..."
+      let hookResult = execShellCmd(state.hooks.preStart)
+      if hookResult != 0:
+        stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
+
+    stderr.writeLine "applying..."
+    let applyResult = nftApply(text)
+    if not applyResult.success:
+      stderr.writeLine "error: nftables apply failed:"
+      stderr.writeLine applyResult.error
+      quit(1)
+
+    if state.hooks.postStart != "":
+      stderr.writeLine "running post_start hook..."
+      let hookResult = execShellCmd(state.hooks.postStart)
+      if hookResult != 0:
+        stderr.writeLine "warning: post_start hook exited with code " & $hookResult
+
+    echo "ok: rules applied"
+
+  proc unifiedDiff(a, b: string, labelA = "running", labelB = "generated", context = 3): string =
+    let linesA = a.splitLines()
+    let linesB = b.splitLines()
+    let items = diffText(a, b)
+
+    if items.len == 0: return ""
+
+    result.add "--- " & labelA & "\n"
+    result.add "+++ " & labelB & "\n"
+
+    for item in items:
+      let startA = max(0, item.startA - context)
+      let startB = max(0, item.startB - context)
+      let endA = min(linesA.len, item.startA + item.deletedA + context)
+      let endB = min(linesB.len, item.startB + item.insertedB + context)
+      let countA = endA - startA
+      let countB = endB - startB
+
+      result.add &"@@ -{startA + 1},{countA} +{startB + 1},{countB} @@\n"
+
+      for i in startA ..< item.startA:
+        result.add " " & linesA[i] & "\n"
+      for i in item.startA ..< item.startA + item.deletedA:
+        result.add "-" & linesA[i] & "\n"
+      for i in item.startB ..< item.startB + item.insertedB:
+        result.add "+" & linesB[i] & "\n"
+      for i in item.startA + item.deletedA ..< endA:
+        result.add " " & linesA[i] & "\n"
+
+  proc cmdDiff(opts: CliOpts) =
+    let state = loadConfig(opts.configFile)
+    discard runValidation(state)
+    let ruleset = buildRuleset(state)
+    let generated = emitText(ruleset)
+
+    let tn = state.config.tableName
+    let currentFilter = nftListTable("inet", tn)
+    let currentNat = nftListTable("inet", tn & "_nat")
+
+    var running = ""
+    if currentFilter.success: running &= currentFilter.output
+    if currentNat.success: running &= currentNat.output
+
+    if running == "":
+      stderr.writeLine "note: no running matchstick tables found (table inet " & tn & ")"
+      echo "--- (no running rules)"
+      echo "+++ (generated)"
+      echo generated
+    else:
+      let d = unifiedDiff(running, generated)
+      if d == "":
+        echo "no differences"
+      else:
+        stdout.write d
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 proc main() =
   let opts = parseCli()
@@ -366,9 +370,19 @@ proc main() =
     case opts.command
     of "check":   cmdCheck(opts)
     of "render":  cmdRender(opts)
-    of "apply":   cmdApply(opts)
-    of "diff":    cmdDiff(opts)
     of "show":    cmdShow(opts)
+    of "apply":
+      when defined(noSystem):
+        stderr.writeLine "error: 'apply' is not available in this build (compiled with -d:noSystem)"
+        quit(1)
+      else:
+        cmdApply(opts)
+    of "diff":
+      when defined(noSystem):
+        stderr.writeLine "error: 'diff' is not available in this build (compiled with -d:noSystem)"
+        quit(1)
+      else:
+        cmdDiff(opts)
     else:
       stderr.writeLine "error: unknown command: " & opts.command
       usage()
