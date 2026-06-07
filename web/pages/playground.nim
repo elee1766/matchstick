@@ -1,4 +1,5 @@
-## Playground page — live check on edit, render on demand.
+## Playground page — runs matchstick in the browser via WASM.
+## Falls back to server API if WASM not available.
 
 import karax/[karaxdsl, vdom]
 import ./layout
@@ -22,6 +23,7 @@ fw:rule(wan, self, "accept", ping)
 """
 
 proc playgroundPage*(): string =
+  let bp = basePath
   let content = buildHtml(tdiv):
     tdiv(class="pg-toolbar"):
       h2: text "playground"
@@ -31,6 +33,7 @@ proc playgroundPage*(): string =
           option(value="text", selected="selected"): text "nftables text"
           option(value="json"): text "nftables json"
           option(value="sysctl"): text "sysctl"
+        span(id="engine-badge", class="pg-badge"): text "loading..."
 
     tdiv(class="pg-grid"):
       section:
@@ -46,10 +49,35 @@ proc playgroundPage*(): string =
           code(id="output-code"):
             text ""
 
-    verbatim """
+    verbatim("""
 <script>
+var wasmReady = false;
 var checkTimer = null;
 var lastConfig = '';
+
+// Try to call matchstick via WASM, fall back to server API
+function callMatchstick(config, format, callback) {
+  if (wasmReady && typeof Module !== 'undefined' && Module.ccall) {
+    try {
+      var resultJson = Module.ccall('loadAndRender', 'string', ['string','string'], [config, format]);
+      callback(JSON.parse(resultJson));
+    } catch (e) {
+      callback({error: 'wasm error: ' + e.message});
+    }
+    return;
+  }
+  // Fallback to server API
+  fetch('/api/' + (format === 'check' ? 'check' : 'render'), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({config: config, format: format}),
+  }).then(function(r) {
+    if (!r.ok) throw new Error('status ' + r.status);
+    return r.json();
+  }).then(callback).catch(function(e) {
+    callback({error: 'no wasm or server available.\nrun locally: nimble webrun'});
+  });
+}
 
 function doCheck() {
   var config = document.getElementById('config-input').value;
@@ -58,14 +86,7 @@ function doCheck() {
   var status = document.getElementById('check-status');
   var out = document.getElementById('output-code');
   status.textContent = 'checking...';
-  fetch('/api/check', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: config}),
-  }).then(function(r) {
-    if (!r.ok) throw new Error('api not available (status ' + r.status + ')');
-    return r.json();
-  }).then(function(data) {
+  callMatchstick(config, 'check', function(data) {
     if (data.error) {
       status.textContent = 'error';
       out.textContent = data.error;
@@ -74,9 +95,6 @@ function doCheck() {
       status.textContent = ok ? 'ok' : 'errors';
       out.textContent = data.output;
     }
-  }).catch(function(e) {
-    status.textContent = 'no server';
-    out.textContent = 'api not available — run the matchstick web server locally:\n  nimble webrun';
   });
 }
 
@@ -91,14 +109,7 @@ document.getElementById('btn-render').addEventListener('click', function() {
   var status = document.getElementById('check-status');
   var out = document.getElementById('output-code');
   status.textContent = 'rendering...';
-  fetch('/api/render', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config: config, format: format}),
-  }).then(function(r) {
-    if (!r.ok) throw new Error('api not available');
-    return r.json();
-  }).then(function(data) {
+  callMatchstick(config, format, function(data) {
     if (data.error) {
       status.textContent = 'error';
       out.textContent = data.error;
@@ -106,15 +117,28 @@ document.getElementById('btn-render').addEventListener('click', function() {
       status.textContent = 'rendered';
       out.textContent = data.output;
     }
-  }).catch(function(e) {
-    status.textContent = 'no server';
-    out.textContent = 'api not available — run the matchstick web server locally:\n  nimble webrun';
   });
 });
 
-// initial check on load
-setTimeout(doCheck, 100);
+// Load WASM module
+var badge = document.getElementById('engine-badge');
+var script = document.createElement('script');
+script.src = '""" & bp & """/static/playground.js';
+script.onload = function() {
+  if (typeof Module !== 'undefined') {
+    Module.onRuntimeInitialized = function() {
+      wasmReady = true;
+      badge.textContent = 'wasm';
+      setTimeout(doCheck, 50);
+    };
+  }
+};
+script.onerror = function() {
+  badge.textContent = 'server';
+  setTimeout(doCheck, 50);
+};
+document.head.appendChild(script);
 </script>
-"""
+""")
 
   layout("playground", content)

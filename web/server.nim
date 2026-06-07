@@ -25,7 +25,8 @@ proc loadConfigFromString(luaCode: string): FirewallState =
     raise newException(CatchableError, "failed to create Lua state")
   defer: lua_close(L)
 
-  luaL_openlibs(L)
+  # Sandboxed: no os, io, package, debug
+  luaL_openlibs_safe(L)
 
   let state = newFirewallState()
 
@@ -143,7 +144,12 @@ proc serveStatic(request: Request, content: string, contentType = "text/html") {
   request.respond(200, headers, content)
 
 proc staticFile(request: Request) =
-  let path = "web/static" / request.uri.replace("/static/", "")
+  let relPath = request.uri.replace("/static/", "")
+  # Prevent path traversal
+  if ".." in relPath or relPath.startsWith("/"):
+    request.respond(403)
+    return
+  let path = "web/static" / relPath
   if not fileExists(path):
     request.respond(404)
     return

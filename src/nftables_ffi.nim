@@ -26,33 +26,31 @@ proc ensureNft(): string =
       "or use 'matchstick render' to generate rules without applying them.")
   return nft
 
-proc nftValidate*(ruleset: string): NftResult =
-  ## Validate a text ruleset via `nft -c -f <tmpfile>` (dry-run).
+proc nftRunWithFile(args: seq[string], ruleset: string): NftResult =
+  ## Write ruleset to temp file and run nft with given args + file path.
   let nft = ensureNft()
   let (tmpFile, tmpPath) = createTempFile("matchstick_", ".nft")
   tmpFile.write(ruleset)
   tmpFile.close()
   defer: removeFile(tmpPath)
-  let (output, exitCode) = execCmdEx(nft & " -c -f " & quoteShell(tmpPath) & " 2>&1")
+  let p = startProcess(nft, args = args & @[tmpPath],
+                       options = {poUsePath, poStdErrToStdOut})
+  let output = p.outputStream.readAll()
+  let exitCode = p.waitForExit()
+  p.close()
   result.success = (exitCode == 0)
   if exitCode == 0:
     result.output = output
   else:
     result.error = output
 
+proc nftValidate*(ruleset: string): NftResult =
+  ## Validate a text ruleset via `nft -c -f <tmpfile>` (dry-run).
+  nftRunWithFile(@["-c", "-f"], ruleset)
+
 proc nftApply*(ruleset: string): NftResult =
   ## Apply a text ruleset via `nft -f <tmpfile>`. Requires root.
-  let nft = ensureNft()
-  let (tmpFile, tmpPath) = createTempFile("matchstick_", ".nft")
-  tmpFile.write(ruleset)
-  tmpFile.close()
-  defer: removeFile(tmpPath)
-  let (output, exitCode) = execCmdEx(nft & " -f " & quoteShell(tmpPath) & " 2>&1")
-  result.success = (exitCode == 0)
-  if exitCode == 0:
-    result.output = output
-  else:
-    result.error = output
+  nftRunWithFile(@["-f"], ruleset)
 
 proc nftListTable*(family, name: string): NftResult =
   ## List a specific table from the running ruleset.

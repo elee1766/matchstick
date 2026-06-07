@@ -94,6 +94,31 @@ proc luaL_newstate*(): LuaState {.importc, cdecl.}
 proc lua_close*(L: LuaState) {.importc, cdecl.}
 proc luaL_openlibs*(L: LuaState) {.importc, cdecl.}
 
+# Individual library openers (for sandboxed loading)
+proc luaopen_base*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_string*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_table*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_math*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_utf8*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_coroutine*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_os*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_io*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_package*(L: LuaState): cint {.importc, cdecl.}
+proc luaopen_debug*(L: LuaState): cint {.importc, cdecl.}
+
+proc luaL_requiref*(L: LuaState, modname: cstring, openf: LuaCFunction, glb: cint) {.importc, cdecl.}
+
+proc lua_settop_fwd(L: LuaState, idx: cint) {.importc: "lua_settop", cdecl.}
+
+proc luaL_openlibs_safe*(L: LuaState) =
+  ## Load only safe Lua libraries (no os, io, package, debug).
+  luaL_requiref(L, "base", luaopen_base, 1); lua_settop_fwd(L, -2)
+  luaL_requiref(L, "string", luaopen_string, 1); lua_settop_fwd(L, -2)
+  luaL_requiref(L, "table", luaopen_table, 1); lua_settop_fwd(L, -2)
+  luaL_requiref(L, "math", luaopen_math, 1); lua_settop_fwd(L, -2)
+  luaL_requiref(L, "utf8", luaopen_utf8, 1); lua_settop_fwd(L, -2)
+  luaL_requiref(L, "coroutine", luaopen_coroutine, 1); lua_settop_fwd(L, -2)
+
 # ---------------------------------------------------------------------------
 # Loading and executing
 # ---------------------------------------------------------------------------

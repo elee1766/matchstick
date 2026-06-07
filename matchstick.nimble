@@ -37,3 +37,10 @@ task webdev, "Build and run with auto-reload on changes":
 
 task ssg, "Build static site to dist/":
   exec "nim c -d:release -d:ssg -r web/ssg.nim"
+
+task wasm, "Build WASM playground (requires Emscripten)":
+  exec "nim c --os:emscripten --cpu:wasm32 -d:noSystem -d:release " &
+    "--passL:\"-s EXPORTED_FUNCTIONS=['_loadAndRender'] " &
+    "-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap'] " &
+    "-s ALLOW_MEMORY_GROWTH=1\" " &
+    "-o:web/static/playground.js web/wasm/playground.nim"

@@ -145,3 +145,9 @@ p, h1, h2, h3, h4, pre, table, ul, ol, dl { text-align: left; }
 .pg-controls select {
   width: auto;
 }
+.pg-badge {
+  font-size: var(--tux-text-micro, 10px);
+  color: var(--tux-text-muted, #888);
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--tux-border, #444);
+}
