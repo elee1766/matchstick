@@ -31,3 +31,6 @@ task web, "Build the web frontend":
 task webrun, "Build and run the web frontend":
   exec "nim c -d:release -o:matchstick_web web/server.nim"
   exec "./matchstick_web"
+
+task webdev, "Build and run with auto-reload on changes":
+  exec "watchexec -r -w web/ -w src/ -e nim,css,js -- nim c -d:release -o:matchstick_web web/server.nim '&&' ./matchstick_web"
