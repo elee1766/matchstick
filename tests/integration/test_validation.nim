@@ -252,3 +252,21 @@ suite "MSS clamp validation":
       fw:mss_clamp("forward")
     """)
     check exitCode == 0
+
+suite "Sysctl overrides":
+  test "fw:sysctl with key-value passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:sysctl("net.ipv4.tcp_syncookies", "1")
+    """)
+    check exitCode == 0
+
+  test "fw:sysctl with table passes":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:sysctl({
+        ["net.ipv4.tcp_syncookies"] = "1",
+        ["net.core.somaxconn"] = "4096",
+      })
+    """)
+    check exitCode == 0

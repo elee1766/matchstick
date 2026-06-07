@@ -450,6 +450,48 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
   return 0
 
 # ---------------------------------------------------------------------------
+# fw:sysctl(key, value) or fw:sysctl({ key = value, ... })
+# ---------------------------------------------------------------------------
+
+proc fwSysctl(L: LuaState): cint {.cdecl.} =
+  ## fw:sysctl("key", "value")  -- set a sysctl
+  ## fw:sysctl("key", false)    -- unset (don't touch this sysctl)
+  ## fw:sysctl({ key = "value", key2 = false, ... })  -- batch set/unset
+  let state = getState(L)
+
+  if lua_type(L, 2) == LUA_TSTRING:
+    let key = $luaL_checkstring(L, 2)
+    if lua_isboolean(L, 3) and lua_toboolean(L, 3) == 0:
+      # fw:sysctl("key", false) -- unset
+      state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
+    elif lua_type(L, 3) == LUA_TSTRING:
+      let value = $lua_tostring(L, 3)
+      state.sysctlOverrides.add SysctlEntry(key: key, value: value)
+    elif lua_isinteger(L, 3) != 0:
+      let value = $lua_tointeger(L, 3)
+      state.sysctlOverrides.add SysctlEntry(key: key, value: value)
+    else:
+      discard luaL_error(L, "fw:sysctl: value must be a string, integer, or false")
+  elif lua_istable(L, 2):
+    lua_pushnil(L)
+    while lua_next(L, 2) != 0:
+      if lua_type(L, -2) == LUA_TSTRING:
+        let key = $lua_tostring(L, -2)
+        if lua_isboolean(L, -1) and lua_toboolean(L, -1) == 0:
+          state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
+        elif lua_type(L, -1) == LUA_TSTRING:
+          let value = $lua_tostring(L, -1)
+          state.sysctlOverrides.add SysctlEntry(key: key, value: value)
+        elif lua_isinteger(L, -1) != 0:
+          let value = $lua_tointeger(L, -1)
+          state.sysctlOverrides.add SysctlEntry(key: key, value: value)
+      lua_pop(L, 1)
+  else:
+    discard luaL_error(L, "fw:sysctl: expected (key, value) strings or a table")
+
+  return 0
+
+# ---------------------------------------------------------------------------
 # fw:redirect({ iface = ..., proto = ..., port = ..., dest_port = ... })
 # ---------------------------------------------------------------------------
 
@@ -748,6 +790,7 @@ proc setupLuaVM*(L: LuaState, state: FirewallState, configFile: string) =
   registerMethod(L, -1, "docker", fwDocker)
   registerMethod(L, -1, "config", fwConfig)
   registerMethod(L, -1, "include", fwInclude)
+  registerMethod(L, -1, "sysctl", fwSysctl)
   registerMethod(L, -1, "redirect", fwRedirect)
   registerMethod(L, -1, "mss_clamp", fwMssClamp)
   registerMethod(L, -1, "hook", fwHook)

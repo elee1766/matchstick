@@ -182,6 +182,15 @@ type
     line*: int
 
   # ------------------------------------------------------------------
+  # Sysctl
+  # ------------------------------------------------------------------
+
+  SysctlEntry* = object
+    key*: string               ## e.g. "net.ipv4.ip_forward"
+    value*: string             ## e.g. "1"
+    unset*: bool               ## if true, remove this key from derived set (don't touch it)
+
+  # ------------------------------------------------------------------
   # Global config
   # ------------------------------------------------------------------
 
@@ -231,6 +240,7 @@ type
     customChains*: seq[CustomChain]
     rawNft*: seq[JsonNode]         ## nftables JSON command objects injected into the ruleset
     chainExceptions*: seq[ChainException]
+    sysctlOverrides*: seq[SysctlEntry]  ## explicit fw:sysctl() overrides
     ## Unified name registry -- all zone and host names.
     ## Used to detect collisions.
     names*: OrderedTable[string, string]  ## name -> "zone" or "host"

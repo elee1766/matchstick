@@ -11,6 +11,7 @@ import ./emit_json
 import ./validate
 import ./show
 import ./nftables_ffi
+import ./sysctl
 
 const
   defaultConfigPaths = [
@@ -30,6 +31,7 @@ Usage:
   matchstick render [config.lua]                    Print nftables text
   matchstick render --json [config.lua]             Print nftables JSON
   matchstick apply  [config.lua]                    Apply to kernel
+  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes
   matchstick diff   [config.lua]                    Diff running vs generated
 
   matchstick show matrix   [config.lua]             Zone policy matrix
@@ -37,6 +39,7 @@ Usage:
   matchstick show topology [config.lua]             Topology diagram
     --format=dot|d2|mermaid|ascii                     (default: ascii)
   matchstick show json     [config.lua]             State as JSON
+  matchstick show sysctl   [config.lua]             Show derived sysctls
 
 If no config file is specified, searches:"""
   for p in defaultConfigPaths:
@@ -102,9 +105,10 @@ proc runValidation(state: FirewallState): bool =
 type
   CliOpts = object
     command: string       ## "check", "render", "apply", "diff", "show"
-    showSub: string       ## "matrix", "rules", "topology", "json"
+    showSub: string       ## "matrix", "rules", "topology", "json", "sysctl"
     configFile: string
     jsonOutput: bool
+    noSysctl: bool        ## skip sysctl application
     format: string        ## topology format
     extraArgs: seq[string]
 
@@ -121,6 +125,7 @@ proc parseCli(): CliOpts =
     of cmdShortOption, cmdLongOption:
       case key
       of "json", "j": result.jsonOutput = true
+      of "no-sysctl": result.noSysctl = true
       of "format": result.format = val
       of "help", "h": usage()
       else:
@@ -169,6 +174,8 @@ proc cmdCheck(opts: CliOpts) =
   let state = loadConfig(opts.configFile)
   let ok = runValidation(state)
   printSummary(state)
+  let sysctls = deriveSysctls(state)
+  stderr.writeLine &"  sysctls:    {sysctls.entries.len}"
   if ok:
     echo "ok: " & opts.configFile
   else:
@@ -202,6 +209,17 @@ proc cmdApply(opts: CliOpts) =
     stderr.writeLine "error: nftables validation failed:"
     stderr.writeLine valResult.error
     quit(1)
+
+  # Apply sysctl settings (before loading nftables rules)
+  if not opts.noSysctl:
+    let sysctls = deriveSysctls(state)
+    if sysctls.entries.len > 0:
+      stderr.writeLine "applying " & $sysctls.entries.len & " sysctl settings..."
+      let errors = applySysctls(sysctls)
+      for e in errors:
+        stderr.writeLine "warning: sysctl: " & e
+  else:
+    stderr.writeLine "skipping sysctl (--no-sysctl)"
 
   if state.hooks.preStart != "":
     stderr.writeLine "running pre_start hook..."
@@ -308,6 +326,9 @@ proc cmdShow(opts: CliOpts) =
       quit(1)
   of "json":
     showStateJson(state)
+  of "sysctl":
+    let sysctls = deriveSysctls(state)
+    stdout.write formatSysctls(sysctls)
   else:
     stderr.writeLine "error: unknown show subcommand: " & opts.showSub
     usage()

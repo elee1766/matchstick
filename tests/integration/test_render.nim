@@ -261,3 +261,41 @@ suite "Tier 2 features":
   test "iplist with URL field accepted":
     let (output, exitCode) = runMatchstick("check", testdataDir / "tier2_features.lua")
     check exitCode == 0
+
+suite "Sysctl derivation":
+  test "host firewall has no ip_forward":
+    let (output, exitCode) = runMatchstick("show", "sysctl", testdataDir / "minimal.lua")
+    check exitCode == 0
+    check "ip_forward" notin output  # minimal config has no forwarding
+    check "arp_announce" in output   # hardening always present
+
+  test "router config derives ip_forward":
+    let (output, exitCode) = runMatchstick("show", "sysctl", testdataDir / "full.lua")
+    check exitCode == 0
+    check "net.ipv4.conf.all.forwarding = 1" in output
+    check "net.ipv6.conf.all.forwarding = 1" in output
+
+  test "sysctl count shown in check":
+    let (output, exitCode) = runMatchstickFull("check", testdataDir / "full.lua")
+    check exitCode == 0
+    check "sysctls:" in output
+
+suite "Sysctl unset":
+  test "fw:sysctl(key, false) removes derived entry":
+    # Write a config that would normally derive ip_forward, then unset it
+    let tmpFile = getTempDir() / "matchstick_sysctl_unset.lua"
+    writeFile(tmpFile, """
+      local self = fw:zone("fw")
+      local wan = fw:zone("wan", "eth0")
+      local lan = fw:zone("lan", "eth1")
+      fw:policy(lan, wan, "accept")
+      -- This config has forwarding, so ip_forward would be derived
+      -- But we explicitly unset it
+      fw:sysctl("net.ipv4.conf.all.forwarding", false)
+      fw:sysctl("net.ipv6.conf.all.forwarding", false)
+    """)
+    let (output, exitCode) = runMatchstick("show", "sysctl", tmpFile)
+    removeFile(tmpFile)
+    check exitCode == 0
+    check "forwarding" notin output  # should be removed
+    check "arp_announce" in output   # other defaults still present

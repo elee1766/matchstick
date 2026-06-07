@@ -5,7 +5,9 @@ nimblecache/
 
 # Test binaries
 tests/test_*
+tests/integration/test_*
 !tests/test_*.nim
+!tests/integration/test_*.nim
 
 # Coverage
 coverage/
