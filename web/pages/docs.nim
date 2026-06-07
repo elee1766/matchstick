@@ -5,33 +5,41 @@ import ./layout
 
 proc docsPage*(): string =
   let content = buildHtml(tdiv(class="docs-layout")):
-    aside:
-      nav:
-        a(href="#how-it-works"): text "how it works"
-        a(href="#zones"): text "zones"
-        a(href="#hosts"): text "hosts"
-        a(href="#services"): text "services"
-        a(href="#policies"): text "policies"
-        a(href="#rules"): text "rules"
-        a(href="#nat"): text "nat"
-        a(href="#dnat", class="toc-h3"): text "dnat"
-        a(href="#snat", class="toc-h3"): text "snat"
-        a(href="#redirect", class="toc-h3"): text "redirect"
-        a(href="#ip-lists"): text "ip lists"
-        a(href="#packet-hygiene"): text "packet hygiene"
-        a(href="#mss-clamping"): text "mss clamping"
-        a(href="#dhcp"): text "dhcp"
-        a(href="#docker"): text "docker"
-        a(href="#sysctl"): text "sysctl"
-        a(href="#hooks"): text "hooks"
-        a(href="#includes"): text "includes"
-        a(href="#rate-limiting"): text "rate limiting"
-        a(href="#custom-chains"): text "custom chains"
-        a(href="#raw-nftables"): text "raw nftables"
-        a(href="#global-config"): text "global config"
-        a(href="#cli"): text "cli"
+    nav(class="docs-toc"):
+      span(class="toc-heading"): text "concepts"
+      a(href="#how-it-works", class="toc-1"): text "how it works"
+      a(href="#zones", class="toc-1"): text "zones"
+      a(href="#hosts", class="toc-1"): text "hosts"
+      a(href="#services", class="toc-1"): text "services"
+      a(href="#policies", class="toc-1"): text "policies"
+      a(href="#rules", class="toc-1"): text "rules"
 
-    tdiv:
+      span(class="toc-heading"): text "nat"
+      a(href="#nat", class="toc-1"): text "overview"
+      a(href="#dnat", class="toc-2"): text "dnat"
+      a(href="#snat", class="toc-2"): text "snat"
+      a(href="#redirect", class="toc-2"): text "redirect"
+
+      span(class="toc-heading"): text "features"
+      a(href="#ip-lists", class="toc-1"): text "ip lists"
+      a(href="#packet-hygiene", class="toc-1"): text "packet hygiene"
+      a(href="#mss-clamping", class="toc-1"): text "mss clamping"
+      a(href="#dhcp", class="toc-1"): text "dhcp"
+      a(href="#docker", class="toc-1"): text "docker"
+      a(href="#sysctl", class="toc-1"): text "sysctl"
+      a(href="#hooks", class="toc-1"): text "hooks"
+      a(href="#includes", class="toc-1"): text "includes"
+      a(href="#rate-limiting", class="toc-1"): text "rate limiting"
+
+      span(class="toc-heading"): text "advanced"
+      a(href="#custom-chains", class="toc-1"): text "custom chains"
+      a(href="#raw-nftables", class="toc-1"): text "raw nftables"
+      a(href="#global-config", class="toc-1"): text "global config"
+
+      span(class="toc-heading"): text "reference"
+      a(href="#cli", class="toc-1"): text "cli"
+
+    tdiv(class="docs-content"):
       h1: text "documentation"
 
       h2(id="how-it-works"): text "how it works"
