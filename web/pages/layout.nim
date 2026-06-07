@@ -2,10 +2,13 @@
 
 import karax/[karaxdsl, vdom]
 
-var basePath* = ""  ## set to "/matchstick" for GitHub Pages, "" for local dev
+when defined(ssg):
+  const basePath* = "/matchstick"
+else:
+  const basePath* = ""
 
 proc layout*(title: string, content: VNode): string =
-  let bp = basePath
+  const bp = basePath
   let page = buildHtml(html(lang="en")):
     head:
       meta(charset="utf-8")
@@ -21,8 +24,8 @@ proc layout*(title: string, content: VNode): string =
         a(href=bp & "/"): text "matchstick"
         nav:
           a(href=bp & "/"): text "home"
-          a(href=bp & "/docs"): text "docs"
-          a(href=bp & "/playground"): text "playground"
+          a(href=bp & "/docs/"): text "docs"
+          a(href=bp & "/playground/"): text "playground"
           a(href="https://github.com/elee1766/matchstick", target="_blank"): text "github"
           button(id="theme-toggle", `data-variant`="ghost"): text "theme"
       main:

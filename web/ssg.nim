@@ -1,8 +1,7 @@
 ## Static site generator — renders all pages to dist/
 ## Outputs directory-based URLs so /docs/ works on GitHub Pages.
 
-import std/[os, strutils]
-import ./pages/layout
+import std/[os]
 import ./pages/home
 import ./pages/docs
 import ./pages/playground
@@ -15,8 +14,6 @@ proc writePage(dir, content: string) =
   writeFile(path / "index.html", content)
 
 proc main() =
-  # Set base path from env or default for GitHub Pages
-  basePath = getEnv("BASE_PATH", "/matchstick")
   removeDir(outDir)
   createDir(outDir)
   createDir(outDir / "static")

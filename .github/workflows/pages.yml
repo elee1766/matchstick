@@ -36,7 +36,7 @@ jobs:
         run: nimble install -y --depsOnly
 
       - name: Build static site
-        run: nimble ssg
+        run: nim c -d:release -d:ssg -r web/ssg.nim
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

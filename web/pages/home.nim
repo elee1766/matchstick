@@ -4,6 +4,7 @@ import karax/[karaxdsl, vdom]
 import ./layout
 
 proc homePage*(): string =
+  const bp = basePath
   let content = buildHtml(tdiv):
     h1: text "matchstick"
     p:
@@ -37,9 +38,9 @@ fw:rule(wan, self, "accept", ping)
 fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })"""
 
     p:
-      a(href="/playground"): button: text "try it"
+      a(href=bp & "/playground/"): button: text "try it"
       text " "
-      a(href="/docs"): button(`data-variant`="soft"): text "documentation"
+      a(href=bp & "/docs/"): button(`data-variant`="soft"): text "documentation"
 
     hr()
 
