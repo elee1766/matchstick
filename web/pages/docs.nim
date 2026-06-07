@@ -118,15 +118,16 @@ proc docsPage*(): string =
         text "(ip forwarding, arp hardening, etc.) based on your config."
 
       h2(id="example"): text "full example"
-      p: text "this is a complete config with the generated nftables output:"
-      details:
-        summary: text "firewall.lua"
-        pre:
-          code: text exZonesAndPolicies
-      details(open=""):
-        summary: text "generated nftables output"
-        pre:
-          code: text outZonesAndPolicies
+      p: text "a complete config and the generated nftables output:"
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exZonesAndPolicies
+        section:
+          header: text "nftables output"
+          pre:
+            code: text outZonesAndPolicies
 
       h2(id="zones"): text "zones"
       p:
@@ -240,14 +241,15 @@ fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })"""
 
       h3(id="nat-example"): text "nat example"
       p: text "a complete nat config with dnat + snat and the generated output:"
-      details:
-        summary: text "firewall.lua"
-        pre:
-          code: text exNat
-      details(open=""):
-        summary: text "generated nftables output"
-        pre:
-          code: text outNat
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exNat
+        section:
+          header: text "nftables output"
+          pre:
+            code: text outNat
 
       h2(id="ip-lists"): text "ip lists"
       p: text "named sets of ip addresses for blocklists, allowlists, geoip, etc."
@@ -309,14 +311,15 @@ fw:sysctl({
 fw:sysctl("net.ipv4.conf.all.forwarding", false)"""
 
       p: text "example: a router config with custom sysctl and an unset override:"
-      details:
-        summary: text "firewall.lua"
-        pre:
-          code: text exSysctl
-      details(open=""):
-        summary: text "derived sysctls"
-        pre:
-          code: text outSysctl
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exSysctl
+        section:
+          header: text "derived sysctls"
+          pre:
+            code: text outSysctl
 
       h2(id="hooks"): text "hooks"
       pre:

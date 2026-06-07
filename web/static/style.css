@@ -88,6 +88,22 @@ body > header button { padding: 0.125rem 0.5rem; font-size: var(--tux-text-xs); 
 main { text-align: left; }
 p, h1, h2, h3, h4, pre, table, ul, ol, dl { text-align: left; }
 
+/* example pairs: input left, output right */
+.example-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+@media (max-width: 768px) {
+  .example-pair { grid-template-columns: 1fr; }
+}
+.example-pair pre {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+}
+
 /* scroll offset for anchors behind sticky header */
 :target { scroll-margin-top: 3rem; }
 

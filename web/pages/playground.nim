@@ -62,7 +62,10 @@ function doCheck() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({config: config}),
-  }).then(function(r) { return r.json(); }).then(function(data) {
+  }).then(function(r) {
+    if (!r.ok) throw new Error('api not available (status ' + r.status + ')');
+    return r.json();
+  }).then(function(data) {
     if (data.error) {
       status.textContent = 'error';
       out.textContent = data.error;
@@ -72,8 +75,8 @@ function doCheck() {
       out.textContent = data.output;
     }
   }).catch(function(e) {
-    status.textContent = 'error';
-    out.textContent = e.message;
+    status.textContent = 'no server';
+    out.textContent = 'api not available — run the matchstick web server locally:\n  nimble webrun';
   });
 }
 
@@ -92,7 +95,10 @@ document.getElementById('btn-render').addEventListener('click', function() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({config: config, format: format}),
-  }).then(function(r) { return r.json(); }).then(function(data) {
+  }).then(function(r) {
+    if (!r.ok) throw new Error('api not available');
+    return r.json();
+  }).then(function(data) {
     if (data.error) {
       status.textContent = 'error';
       out.textContent = data.error;
@@ -101,8 +107,8 @@ document.getElementById('btn-render').addEventListener('click', function() {
       out.textContent = data.output;
     }
   }).catch(function(e) {
-    status.textContent = 'error';
-    out.textContent = e.message;
+    status.textContent = 'no server';
+    out.textContent = 'api not available — run the matchstick web server locally:\n  nimble webrun';
   });
 });
 
