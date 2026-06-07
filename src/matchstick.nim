@@ -12,6 +12,7 @@ import ./validate
 import ./show
 import ./nftables_ffi
 import ./sysctl
+import ./import_ufw
 
 const
   defaultConfigPaths = [
@@ -40,6 +41,9 @@ Usage:
     --format=dot|d2|mermaid|ascii                     (default: ascii)
   matchstick show json     [config.lua]             State as JSON
   matchstick show sysctl   [config.lua]             Show derived sysctls
+
+  matchstick import-ufw                             Import UFW rules from stdin
+                                                      sudo ufw show added | matchstick import-ufw
 
 If no config file is specified, searches:"""
   for p in defaultConfigPaths:
@@ -337,8 +341,25 @@ proc cmdShow(opts: CliOpts) =
 # Main
 # ---------------------------------------------------------------------------
 
+proc cmdImportUfw() =
+  let input = stdin.readAll()
+  if input.strip() == "":
+    stderr.writeLine "error: no input. Usage: sudo ufw show added | matchstick import-ufw"
+    quit(1)
+  stdout.write importUfw(input)
+
 proc main() =
   let opts = parseCli()
+
+  # Commands that don't need a config file
+  if opts.command == "import-ufw":
+    try:
+      cmdImportUfw()
+    except CatchableError as e:
+      stderr.writeLine "error: " & e.msg
+      quit(1)
+    return
+
   requireConfig(opts)
 
   try:

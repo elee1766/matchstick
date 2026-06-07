@@ -1,252 +1,218 @@
 ## import_ufw.nim - Parse UFW rules and generate matchstick Lua config.
 ##
-## Supports two input formats:
-##   1. `ufw show added` output (lines starting with "ufw ")
-##   2. `ufw status` output (the "To/Action/From" table format)
+## Parses `ufw show added` output (lines starting with "ufw ").
 ##
 ## Usage:
 ##   sudo ufw show added | matchstick import-ufw
-##   sudo ufw status verbose | matchstick import-ufw
-##   matchstick import-ufw /etc/default/ufw    # reads defaults + tries to run ufw
+##   matchstick import-ufw < ufw-rules.txt
 
-import std/[strutils, sequtils, tables, sets, os, osproc]
+import std/[strutils, sequtils, tables, sets, os, options]
 
 type
   UfwAction = enum
     ufwAllow, ufwDeny, ufwReject, ufwLimit
 
   UfwDirection = enum
-    ufwIn, ufwOut, ufwFwd
+    ufwIn, ufwOut, ufwRoute
 
   UfwRule = object
     action: UfwAction
     direction: UfwDirection
-    proto: string        ## "tcp", "udp", "" (any), "tcp,udp" (both)
-    port: string         ## "22", "80,443", "6881:6999", "" (any)
-    fromAddr: string     ## "192.168.0.0/16", "Anywhere", ""
-    toAddr: string       ## "any", specific IP, ""
+    proto: string        ## "tcp", "udp", "" (any)
+    port: string         ## "22", "60000:61000", "" (any)
+    fromAddr: string     ## "192.168.0.0/16", "" (anywhere)
+    toAddr: string       ## specific IP or "" (any)
     iface: string        ## interface name, "" if not specified
     comment: string
-    ipv6Only: bool
 
 # ---------------------------------------------------------------------------
-# Parse "ufw status" table format
+# Parse a single "ufw ..." line
 # ---------------------------------------------------------------------------
 
-proc parseStatusLine(line: string): Option[UfwRule] =
-  ## Parse a line from "ufw status" output like:
-  ##   22/tcp                     ALLOW       192.168.0.0/16
-  ##   Anywhere                   ALLOW       192.168.0.1
-  ##   53 on waydroid0            ALLOW       Anywhere                   # waydroid
-  ##   67                         ALLOW OUT   Anywhere on waydroid0      # waydroid
-  ##   Anywhere                   ALLOW FWD   Anywhere on waydroid0      # Waydroid
+proc parseUfwLine(line: string): Option[UfwRule] =
+  ## Parse a line from `ufw show added` output.
+  ## Examples:
+  ##   ufw allow from 192.168.0.1
+  ##   ufw allow 4010/udp
+  ##   ufw allow from 192.168.0.0/16 to any port 22 proto tcp
+  ##   ufw allow out on waydroid0 to any port 67 comment 'waydroid'
+  ##   ufw route allow in on waydroid0 comment 'Waydroid'
   let trimmed = line.strip()
-  if trimmed == "" or trimmed.startsWith("--") or trimmed.startsWith("To "):
+  if not trimmed.startsWith("ufw "):
     return none(UfwRule)
 
-  # Extract comment
-  var comment = ""
-  var working = trimmed
-  let commentIdx = working.find(" # ")
-  if commentIdx >= 0:
-    comment = working[commentIdx + 3 .. ^1].strip()
-    working = working[0 ..< commentIdx].strip()
-
-  # Skip v6 duplicate rules (they're just the v4 rule repeated for IPv6)
-  let isV6 = "(v6)" in working
-  if isV6:
-    working = working.replace("(v6)", "").strip()
-    working = working.replace("Anywhere ", "Anywhere ") # clean double spaces
-
-  # Split into columns by multiple spaces
-  var parts: seq[string]
+  var tokens: seq[string]
+  # Handle quoted strings (comments with spaces)
+  var i = 0
   var current = ""
-  var spaceCount = 0
-  for c in working:
-    if c == ' ':
-      spaceCount += 1
-      if spaceCount >= 2 and current.len > 0:
-        parts.add current.strip()
+  var inQuote = false
+  var quoteChar = ' '
+  for c in trimmed:
+    if inQuote:
+      if c == quoteChar:
+        inQuote = false
+        tokens.add current
         current = ""
-        spaceCount = 0
+      else:
+        current.add c
+    elif c == '\'' or c == '"':
+      inQuote = true
+      quoteChar = c
+      if current.len > 0:
+        tokens.add current
+        current = ""
+    elif c == ' ':
+      if current.len > 0:
+        tokens.add current
+        current = ""
     else:
-      if spaceCount > 0 and spaceCount < 2:
-        current &= ' '
-      current &= c
-      spaceCount = 0
-  if current.strip().len > 0:
-    parts.add current.strip()
+      current.add c
+  if current.len > 0:
+    tokens.add current
 
-  if parts.len < 3:
-    return none(UfwRule)
+  # tokens[0] = "ufw", skip it
+  if tokens.len < 2: return none(UfwRule)
+  var pos = 1
 
-  var rule = UfwRule(ipv6Only: isV6)
+  var rule = UfwRule(direction: ufwIn)
 
-  # Parse action + direction (column 2)
-  let actionCol = parts[1].toUpperAscii()
-  if "ALLOW" in actionCol: rule.action = ufwAllow
-  elif "DENY" in actionCol: rule.action = ufwDeny
-  elif "REJECT" in actionCol: rule.action = ufwReject
-  elif "LIMIT" in actionCol: rule.action = ufwLimit
+  # Check for "route" prefix
+  if pos < tokens.len and tokens[pos] == "route":
+    rule.direction = ufwRoute
+    pos += 1
+
+  # Action
+  if pos >= tokens.len: return none(UfwRule)
+  case tokens[pos]
+  of "allow": rule.action = ufwAllow
+  of "deny": rule.action = ufwDeny
+  of "reject": rule.action = ufwReject
+  of "limit": rule.action = ufwLimit
   else: return none(UfwRule)
+  pos += 1
 
-  if "FWD" in actionCol: rule.direction = ufwFwd
-  elif "OUT" in actionCol: rule.direction = ufwOut
-  else: rule.direction = ufwIn
-
-  # Parse "To" column (column 1) - port/proto and optional interface
-  var toCol = parts[0]
-  if " on " in toCol:
-    let onParts = toCol.split(" on ")
-    toCol = onParts[0].strip()
-    rule.iface = onParts[1].strip()
-
-  if toCol == "Anywhere":
-    discard  # no port filter
-  elif "/" in toCol:
-    let pp = toCol.split("/")
-    rule.port = pp[0]
-    rule.proto = pp[1]
-  else:
-    rule.port = toCol
-
-  # Parse "From" column (column 3) - address and optional interface
-  var fromCol = parts[2]
-  if " on " in fromCol:
-    let onParts = fromCol.split(" on ")
-    fromCol = onParts[0].strip()
-    if rule.iface == "":
-      rule.iface = onParts[1].strip()
-
-  if fromCol != "Anywhere":
-    rule.fromAddr = fromCol
-
-  rule.comment = comment
+  # Parse remaining tokens
+  while pos < tokens.len:
+    let tok = tokens[pos]
+    case tok
+    of "in":
+      rule.direction = if rule.direction == ufwRoute: ufwRoute else: ufwIn
+      pos += 1
+    of "out":
+      rule.direction = ufwOut
+      pos += 1
+    of "on":
+      pos += 1
+      if pos < tokens.len:
+        rule.iface = tokens[pos]
+        pos += 1
+    of "from":
+      pos += 1
+      if pos < tokens.len:
+        let a = tokens[pos]
+        if a != "any":
+          rule.fromAddr = a
+        pos += 1
+    of "to":
+      pos += 1
+      if pos < tokens.len:
+        let a = tokens[pos]
+        if a != "any":
+          rule.toAddr = a
+        pos += 1
+    of "port":
+      pos += 1
+      if pos < tokens.len:
+        rule.port = tokens[pos]
+        pos += 1
+    of "proto":
+      pos += 1
+      if pos < tokens.len:
+        rule.proto = tokens[pos]
+        pos += 1
+    of "comment":
+      pos += 1
+      if pos < tokens.len:
+        rule.comment = tokens[pos]
+        pos += 1
+    of "log", "log-all":
+      pos += 1
+    else:
+      # Could be a simple port/proto: "22/tcp", "22", "ssh"
+      if "/" in tok:
+        let parts = tok.split("/")
+        rule.port = parts[0]
+        rule.proto = parts[1]
+      elif tok.allCharsInSet({'0'..'9', ':', ','}):
+        rule.port = tok
+      # else unknown token, skip
+      pos += 1
 
   return some(rule)
-
-# ---------------------------------------------------------------------------
-# Collect unique values for Lua generation
-# ---------------------------------------------------------------------------
-
-type
-  LuaGen = object
-    interfaces: OrderedTable[string, string]  ## iface -> zone name
-    subnets: OrderedTable[string, string]     ## subnet -> host/group name
-    rules: seq[UfwRule]
-    inputPolicy: string
-    outputPolicy: string
-    forwardPolicy: string
-
-proc inferZoneName(iface: string): string =
-  ## Generate a zone name from interface name.
-  case iface
-  of "eth0": "wan"
-  of "eth1": "lan"
-  of "wlan0": "wifi"
-  of "docker0": "docker"
-  else:
-    if iface.startsWith("br-"): "docker"
-    elif iface.startsWith("wl"): "wifi"
-    elif iface.startsWith("en"): iface
-    else: iface.replace("-", "_").replace("+", "")
-
-proc inferSubnetName(addr: string): string =
-  ## Generate a name for a source address/subnet.
-  if "/" in addr:
-    let parts = addr.split("/")
-    let octets = parts[0].split(".")
-    if octets.len == 4:
-      return "net_" & octets[0] & "_" & octets[1]
-  # Single IP
-  let octets = addr.split(".")
-  if octets.len == 4:
-    return "host_" & octets[^1]
-  return addr.replace(".", "_").replace("/", "_").replace(":", "_")
 
 # ---------------------------------------------------------------------------
 # Generate Lua output
 # ---------------------------------------------------------------------------
 
-proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy, forwardPolicy: string): string =
+proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): string =
   var lines: seq[string]
 
   lines.add "---------------------------------------------------------------------------"
-  lines.add "-- matchstick config generated from UFW rules"
-  lines.add "-- Review and adjust zone names, host names, and interface assignments"
+  lines.add "-- matchstick firewall config (generated from UFW)"
+  lines.add "--"
+  lines.add "-- Review this file and adjust:"
+  lines.add "--   1. Zone names and interface assignments"
+  lines.add "--   2. Host names for source IP addresses"
+  lines.add "--   3. Service names for well-known ports"
   lines.add "---------------------------------------------------------------------------"
   lines.add ""
 
-  # Collect unique interfaces and source addresses
+  # Collect unique interfaces, source addresses, and port/proto combos
   var ifaces: OrderedSet[string]
-  var sources: OrderedSet[string]
-  var serviceMap: OrderedTable[string, string]  ## "proto/port" -> service var name
+  var sourceAddrs: OrderedSet[string]
+  type PortProto = tuple[port, proto: string]
+  var portProtos: OrderedSet[PortProto]
 
   for r in rules:
     if r.iface != "": ifaces.incl r.iface
-    if r.fromAddr != "": sources.incl r.fromAddr
+    if r.fromAddr != "": sourceAddrs.incl r.fromAddr
+    if r.port != "":
+      portProtos.incl (r.port, r.proto)
 
-  # Build service definitions from unique proto/port combos
-  var svcIdx = 0
-  for r in rules:
-    if r.port == "" or r.ipv6Only: continue
-    let key = r.proto & "/" & r.port
-    if key notin serviceMap:
-      # Try to name well-known services
-      let name = case r.port
-        of "22": "ssh"
-        of "80": "http"
-        of "443": "https"
-        of "53": "dns"
-        of "67": "dhcp_server"
-        of "68": "dhcp_client"
-        of "123": "ntp"
-        of "25": "smtp"
-        of "993": "imaps"
-        of "5901": "vnc"
-        else:
-          if r.proto != "":
-            "svc_" & r.proto & "_" & r.port.replace(":", "_").replace(",", "_")
-          else:
-            "svc_" & r.port.replace(":", "_").replace(",", "_")
-          
-      serviceMap[key] = name
+  # Name well-known services
+  proc serviceName(port, proto: string): string =
+    case port
+    of "22": "ssh"
+    of "53": "dns"
+    of "67": "dhcp_server"
+    of "68": "dhcp_client"
+    of "80": "http"
+    of "443": "https"
+    of "123": "ntp"
+    of "25": "smtp"
+    of "993": "imaps"
+    of "5901": "vnc"
+    else:
+      var name = "svc_" & port.replace(":", "_").replace(",", "_")
+      if proto != "": name &= "_" & proto
+      name
+
+  # Build service variable map
+  var svcMap: OrderedTable[PortProto, string]
+  for pp in portProtos:
+    svcMap[pp] = serviceName(pp.port, pp.proto)
 
   # Emit services
-  if serviceMap.len > 0:
-    lines.add "---------------------------------------------------------------------------"
-    lines.add "-- Services"
-    lines.add "---------------------------------------------------------------------------"
-    for key, name in serviceMap:
-      let parts = key.split("/")
-      let proto = parts[0]
-      let port = parts[1]
-      if "," in port:
-        # Multiple ports - need complex service form
-        let ports = port.split(",")
-        if proto != "":
-          var entries: seq[string]
-          for p in ports:
-            entries.add "  {\"" & proto & "\", " & p & "}"
-          lines.add "local " & name & " = fw:service(\"" & name & "\", {"
-          lines.add entries.join(",\n")
-          lines.add "})"
-        else:
-          lines.add "local " & name & " = fw:service(\"" & name & "\", \"tcp\", " & ports[0] & ")"
-      elif ":" in port:
-        # Port range
-        let range = port.replace(":", "-")
-        if proto != "":
-          lines.add "local " & name & " = fw:service(\"" & name & "\", \"" & proto & "\", \"" & range & "\")"
-        else:
-          lines.add "local " & name & " = fw:service(\"" & name & "\", \"tcp\", \"" & range & "\")"
-      else:
-        if proto != "":
-          lines.add "local " & name & " = fw:service(\"" & name & "\", \"" & proto & "\", " & port & ")"
-        else:
-          # No proto specified = both tcp and udp
-          lines.add "local " & name & " = fw:service(\"" & name & "\", {\"tcp\", \"udp\"}, " & port & ")"
-    lines.add ""
+  lines.add "---------------------------------------------------------------------------"
+  lines.add "-- Services"
+  lines.add "---------------------------------------------------------------------------"
+  for pp, name in svcMap:
+    let port = pp.port.replace(":", "-")  # UFW uses ":" for ranges, nftables uses "-"
+    if pp.proto != "":
+      lines.add "local " & name & " = fw:service(\"" & name & "\", \"" & pp.proto & "\", \"" & port & "\")"
+    else:
+      lines.add "local " & name & " = fw:service(\"" & name & "\", {\"tcp\", \"udp\"}, \"" & port & "\")"
+  lines.add ""
 
   # Emit zones
   lines.add "---------------------------------------------------------------------------"
@@ -254,50 +220,69 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy, forwardPolicy:
   lines.add "---------------------------------------------------------------------------"
   lines.add "local self = fw:zone(\"fw\")"
 
-  if ifaces.len > 0:
-    for iface in ifaces:
-      let zname = inferZoneName(iface)
-      lines.add "local " & zname & " = fw:zone(\"" & zname & "\", \"" & iface & "\")"
+  # Zone naming
+  var zoneNames: OrderedTable[string, string]
+  if ifaces.len == 0:
+    # No interface-specific rules, create a default
+    zoneNames["eth0"] = "net"
+    lines.add "local net = fw:zone(\"net\", \"eth0\")  -- TODO: adjust interface"
   else:
-    # No interface-specific rules, create a generic zone
-    lines.add "-- TODO: replace with your actual interface"
-    lines.add "local net = fw:zone(\"net\", \"eth0\")"
+    for iface in ifaces:
+      let zn = case iface
+        of "eth0": "net"
+        of "eth1": "lan"
+        of "wlan0": "wifi"
+        of "docker0": "docker"
+        else: iface.replace("-", "_").replace("+", "")
+      zoneNames[iface] = zn
+      lines.add "local " & zn & " = fw:zone(\"" & zn & "\", \"" & iface & "\")"
+
+  # If no interfaces from rules, we still need a default zone for non-interface rules
+  let defaultZone = if zoneNames.len > 0: zoneNames.values.toSeq[0] else: "net"
 
   lines.add ""
 
-  # Emit hosts for source addresses
-  if sources.len > 0:
+  # Emit hosts for single IP sources
+  var hostNames: OrderedTable[string, string]
+  var subnetAddrs: seq[string]
+
+  for addr in sourceAddrs:
+    if "/" in addr:
+      subnetAddrs.add addr
+    else:
+      let octets = addr.split(".")
+      let name = "host_" & octets[^1]
+      hostNames[addr] = name
+
+  if hostNames.len > 0 or subnetAddrs.len > 0:
     lines.add "---------------------------------------------------------------------------"
-    lines.add "-- Hosts / source addresses"
+    lines.add "-- Hosts"
     lines.add "---------------------------------------------------------------------------"
-    # Determine which zone each source belongs to (use first iface zone, or generic)
-    let defaultZone = if ifaces.len > 0: inferZoneName(ifaces.toSeq[0]) else: "net"
-    for src in sources:
-      let name = inferSubnetName(src)
-      if "/" in src:
-        lines.add "-- Subnet: " & src & " (adjust zone if needed)"
-        lines.add "-- To match a subnet, use saddr_list with an iplist, or host for single IPs"
-      else:
-        lines.add "local " & name & " = fw:host(\"" & name & "\", { zone = " & defaultZone & ", addr = \"" & src & "\" })"
+    for addr, name in hostNames:
+      lines.add "local " & name & " = fw:host(\"" & name & "\", { zone = " & defaultZone & ", addr = \"" & addr & "\" })"
+    lines.add ""
+
+  # Emit IP lists for subnets
+  if subnetAddrs.len > 0:
+    lines.add "---------------------------------------------------------------------------"
+    lines.add "-- IP lists (for subnet-based source filtering)"
+    lines.add "---------------------------------------------------------------------------"
+    for addr in subnetAddrs:
+      let octets = addr.split("/")[0].split(".")
+      let name = "net_" & octets[0] & "_" & octets[1]
+      hostNames[addr] = name  # reuse hostNames for lookup
+      lines.add "fw:iplist(\"" & name & "\", { type = \"ipv4\", flags = \"interval\", elements = { \"" & addr & "\" } })"
     lines.add ""
 
   # Emit policies
   lines.add "---------------------------------------------------------------------------"
-  lines.add "-- Policies (from UFW defaults)"
+  lines.add "-- Policies"
   lines.add "---------------------------------------------------------------------------"
-  let inPol = case inputPolicy.toLowerAscii.strip(chars = {'"'})
-    of "drop": "drop"
-    of "reject": "reject"
-    else: "accept"
-  let outPol = case outputPolicy.toLowerAscii.strip(chars = {'"'})
-    of "drop": "drop"
-    of "reject": "reject"
-    else: "accept"
-
-  let defaultZone = if ifaces.len > 0: inferZoneName(ifaces.toSeq[0]) else: "net"
-
-  lines.add "fw:policy(\"*\", self, \"" & inPol & "\", { log = true })  -- default incoming"
-  lines.add "fw:policy(self, \"*\", \"" & outPol & "\")                  -- default outgoing"
+  let inPol = inputPolicy.toLowerAscii.strip(chars = {'"', '\''})
+  let outPol = outputPolicy.toLowerAscii.strip(chars = {'"', '\''})
+  lines.add "fw:policy(\"*\", self, \"" & inPol & "\", { log = true })"
+  lines.add "fw:policy(self, \"*\", \"" & outPol & "\")"
+  lines.add "fw:policy(\"*\", \"*\", \"drop\")"
   lines.add ""
 
   # Emit rules
@@ -306,8 +291,6 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy, forwardPolicy:
   lines.add "---------------------------------------------------------------------------"
 
   for r in rules:
-    if r.ipv6Only: continue  # skip v6 duplicates, matchstick handles dual-stack
-
     var commentStr = ""
     if r.comment != "":
       commentStr = "  -- " & r.comment
@@ -318,104 +301,88 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy, forwardPolicy:
       of ufwReject: "reject"
       of ufwLimit: "accept"
 
-    # Determine source
-    var src = "\"*\""
+    # Determine source expression
+    var src: string
     if r.fromAddr != "":
-      if "/" in r.fromAddr:
-        src = "\"*\"  -- TODO: from " & r.fromAddr & " (use saddr_list)"
+      if r.fromAddr in hostNames:
+        src = hostNames[r.fromAddr]
       else:
-        src = inferSubnetName(r.fromAddr)
-
-    # Determine dest zone
-    var dst = "self"
-    if r.direction == ufwOut:
-      dst = defaultZone
+        src = "\"*\"  --[[ from " & r.fromAddr & " ]]"
+    elif r.direction == ufwOut:
       src = "self"
-    elif r.direction == ufwFwd:
-      # Forward rules
-      if r.iface != "":
-        let zn = inferZoneName(r.iface)
-        lines.add "-- forward: allow from " & zn & commentStr
-        lines.add "fw:rule(" & zn & ", \"*\", \"" & action & "\")"
-        continue
-      else:
-        lines.add "-- forward rule (adjust zones)" & commentStr
-        continue
+    else:
+      src = "\"*\""
 
-    # Build rule
+    # Determine destination
+    var dst: string
+    if r.direction == ufwOut:
+      dst = if r.iface != "" and r.iface in zoneNames: zoneNames[r.iface] else: "\"*\""
+    elif r.direction == ufwRoute:
+      # Forward rule
+      let fromZone = if r.iface != "" and r.iface in zoneNames: zoneNames[r.iface] else: "\"*\""
+      lines.add "fw:rule(" & fromZone & ", \"*\", \"" & action & "\")" & commentStr
+      continue
+    else:
+      dst = "self"
+
+    # Determine service/port
     if r.port == "" and r.proto == "":
-      # Bare rule (allow/deny all from source)
+      # Bare rule
       lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\")" & commentStr
     else:
-      let key = r.proto & "/" & r.port
-      if key in serviceMap:
-        let svcName = serviceMap[key]
+      let pp: PortProto = (r.port, r.proto)
+      if pp in svcMap:
+        let svcName = svcMap[pp]
         if r.action == ufwLimit:
           lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", {"
           lines.add "  service = " & svcName & ","
-          lines.add "  rate = util:rate(\"6/30seconds\", { burst = 6 }),"
+          lines.add "  rate = util:rate(\"6/minute\", { burst = 6 }),"
           lines.add "})" & commentStr
+        elif r.fromAddr != "" and "/" in r.fromAddr and r.fromAddr in hostNames:
+          # Subnet source needs saddr_list
+          lines.add "fw:rule(\"*\", " & dst & ", \"" & action & "\", { service = " & svcName & ", saddr_list = \"" & hostNames[r.fromAddr] & "\" })" & commentStr
         else:
           lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", " & svcName & ")" & commentStr
       else:
-        # Inline proto/port
-        var opts: seq[string]
-        if r.proto != "": opts.add "proto = \"" & r.proto & "\""
-        if r.port != "":
-          let port = r.port.replace(":", "-")
-          opts.add "port = \"" & port & "\""
-        if r.action == ufwLimit:
-          opts.add "rate = util:rate(\"6/30seconds\", { burst = 6 })"
-        lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { " & opts.join(", ") & " })" & commentStr
+        lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { proto = \"" & r.proto & "\", port = \"" & r.port.replace(":", "-") & "\" })" & commentStr
 
   lines.add ""
   return lines.join("\n") & "\n"
 
 # ---------------------------------------------------------------------------
-# Read UFW defaults from /etc/default/ufw
+# Read UFW defaults
 # ---------------------------------------------------------------------------
 
-proc readUfwDefaults(path: string): tuple[input, output, forward: string] =
-  result = ("DROP", "ACCEPT", "DROP")
+proc readUfwDefaults*(): tuple[input, output: string] =
+  result = ("DROP", "ACCEPT")
+  let path = "/etc/default/ufw"
   if not fileExists(path): return
-  for line in readFile(path).splitLines():
-    let stripped = line.strip()
-    if stripped.startsWith("DEFAULT_INPUT_POLICY="):
-      result.input = stripped.split("=", 1)[1].strip(chars = {'"', '\''})
-    elif stripped.startsWith("DEFAULT_OUTPUT_POLICY="):
-      result.output = stripped.split("=", 1)[1].strip(chars = {'"', '\''})
-    elif stripped.startsWith("DEFAULT_FORWARD_POLICY="):
-      result.forward = stripped.split("=", 1)[1].strip(chars = {'"', '\''})
+  try:
+    for line in readFile(path).splitLines():
+      let s = line.strip()
+      if s.startsWith("DEFAULT_INPUT_POLICY="):
+        result.input = s.split("=", 1)[1].strip(chars = {'"', '\''})
+      elif s.startsWith("DEFAULT_OUTPUT_POLICY="):
+        result.output = s.split("=", 1)[1].strip(chars = {'"', '\''})
+  except IOError:
+    discard
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 proc importUfw*(input: string): string =
-  ## Parse UFW status output and generate matchstick Lua.
-  ## Accepts `ufw status` table format from stdin.
+  ## Parse `ufw show added` output and generate matchstick Lua config.
   var rules: seq[UfwRule]
 
-  let defaults = readUfwDefaults("/etc/default/ufw")
-
-  # Parse each line
-  var inRules = false
   for line in input.splitLines():
     let trimmed = line.strip()
-
-    # Detect start of rules table
-    if trimmed.startsWith("To ") and "Action" in trimmed and "From" in trimmed:
-      inRules = true
+    # Skip header line from `ufw show added`
+    if trimmed.startsWith("Added user rules"):
       continue
-    if trimmed.startsWith("--") and inRules:
-      continue  # separator line
+    let parsed = parseUfwLine(trimmed)
+    if parsed.isSome:
+      rules.add parsed.get
 
-    if inRules:
-      if trimmed == "": 
-        inRules = false
-        continue
-      let parsed = parseStatusLine(trimmed)
-      if parsed.isSome:
-        rules.add parsed.get
-
-  return generateLua(rules, defaults.input, defaults.output, defaults.forward)
+  let defaults = readUfwDefaults()
+  return generateLua(rules, defaults.input, defaults.output)

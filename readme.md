@@ -6,6 +6,8 @@ shorewall-like firewall config tool that uses lua.
 
 meant to hopefully replace shorewall for me.
 
+this is relatively untested, but i think it's pretty cool
+
 ## Example
 
 ```lua
