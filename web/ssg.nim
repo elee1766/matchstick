@@ -2,6 +2,7 @@
 ## Outputs directory-based URLs so /docs/ works on GitHub Pages.
 
 import std/[os]
+import ./pages/docs
 import ./pages/home
 import ./pages/docs
 import ./pages/playground
@@ -14,6 +15,7 @@ proc writePage(dir, content: string) =
   writeFile(path / "index.html", content)
 
 proc main() =
+  initExamples()
   removeDir(outDir)
   createDir(outDir)
   createDir(outDir / "static")

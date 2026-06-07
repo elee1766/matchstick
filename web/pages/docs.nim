@@ -2,12 +2,74 @@
 
 import karax/[karaxdsl, vdom]
 import ./layout
+import ./render
+
+# -- live examples (compiled at build time) --
+
+const exZonesAndPolicies = """local ssh  = fw:service("ssh", "tcp", 22)
+local ping = fw:service("ping", "icmp", "echo-request")
+
+local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local lan  = fw:zone("lan", "eth1")
+
+fw:policy(wan, self, "drop", { log = true })
+fw:policy(self, wan, "accept")
+fw:policy(lan, self, "accept")
+fw:policy(lan, wan, "accept")
+
+fw:rule(wan, self, "accept", ssh)
+fw:rule(wan, self, "accept", ping)
+fw:rule(lan, self, "accept", { proto = "tcp", port = {80, 443} })
+"""
+
+const exNat = """local http = fw:service("http", "tcp", 80)
+
+local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local lan  = fw:zone("lan", "eth1")
+local dmz  = fw:zone("dmz", "eth2")
+
+local webserver = fw:host("webserver", { zone = dmz, addr = "172.16.0.10" })
+
+fw:policy(wan, self, "drop")
+fw:policy(self, wan, "accept")
+fw:policy(lan, wan, "accept")
+fw:policy(wan, dmz, "drop")
+
+fw:dnat({ iface = wan, service = http, dest = webserver })
+fw:rule(wan, webserver, "accept", http)
+
+fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
+fw:snat({ from = "172.16.0.0/12", oif = "eth0", masquerade = true })
+"""
+
+const exSysctl = """local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local lan  = fw:zone("lan", "eth1")
+
+fw:policy(lan, wan, "accept")
+
+fw:sysctl("net.ipv4.tcp_syncookies", "1")
+fw:sysctl("net.ipv4.conf.all.log_martians", false)
+"""
+
+# These run at startup, before Mummy's thread pool starts
+var outZonesAndPolicies {.global.}: string
+var outNat {.global.}: string
+var outSysctl {.global.}: string
+
+proc initExamples*() =
+  outZonesAndPolicies = renderExample(exZonesAndPolicies)
+  outNat = renderExample(exNat)
+  outSysctl = renderSysctls(exSysctl)
 
 proc docsPage*(): string =
   let content = buildHtml(tdiv(class="docs-layout")):
     nav(class="docs-toc"):
       span(class="toc-heading"): text "concepts"
       a(href="#how-it-works", class="toc-1"): text "how it works"
+      a(href="#example", class="toc-1"): text "full example"
       a(href="#zones", class="toc-1"): text "zones"
       a(href="#hosts", class="toc-1"): text "hosts"
       a(href="#services", class="toc-1"): text "services"
@@ -19,6 +81,7 @@ proc docsPage*(): string =
       a(href="#dnat", class="toc-2"): text "dnat"
       a(href="#snat", class="toc-2"): text "snat"
       a(href="#redirect", class="toc-2"): text "redirect"
+      a(href="#nat-example", class="toc-2"): text "nat example"
 
       span(class="toc-heading"): text "features"
       a(href="#ip-lists", class="toc-1"): text "ip lists"
@@ -53,6 +116,17 @@ proc docsPage*(): string =
       p:
         text "at apply time, matchstick also derives and sets kernel sysctl parameters "
         text "(ip forwarding, arp hardening, etc.) based on your config."
+
+      h2(id="example"): text "full example"
+      p: text "this is a complete config with the generated nftables output:"
+      details:
+        summary: text "firewall.lua"
+        pre:
+          code: text exZonesAndPolicies
+      details(open=""):
+        summary: text "generated nftables output"
+        pre:
+          code: text outZonesAndPolicies
 
       h2(id="zones"): text "zones"
       p:
@@ -164,6 +238,17 @@ fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })"""
         code:
           text """fw:redirect({ iface = lan, proto = "tcp", port = {80}, dest_port = 3128 })"""
 
+      h3(id="nat-example"): text "nat example"
+      p: text "a complete nat config with dnat + snat and the generated output:"
+      details:
+        summary: text "firewall.lua"
+        pre:
+          code: text exNat
+      details(open=""):
+        summary: text "generated nftables output"
+        pre:
+          code: text outNat
+
       h2(id="ip-lists"): text "ip lists"
       p: text "named sets of ip addresses for blocklists, allowlists, geoip, etc."
       pre:
@@ -222,6 +307,16 @@ fw:sysctl({
 
 -- unset a derived default (matchstick won't touch it)
 fw:sysctl("net.ipv4.conf.all.forwarding", false)"""
+
+      p: text "example: a router config with custom sysctl and an unset override:"
+      details:
+        summary: text "firewall.lua"
+        pre:
+          code: text exSysctl
+      details(open=""):
+        summary: text "derived sysctls"
+        pre:
+          code: text outSysctl
 
       h2(id="hooks"): text "hooks"
       pre:

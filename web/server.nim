@@ -136,15 +136,11 @@ proc apiCheck(request: Request) =
 # Static pages (cacheable)
 # ---------------------------------------------------------------------------
 
-proc serveStatic(request: Request, content: string, contentType = "text/html") =
+proc serveStatic(request: Request, content: string, contentType = "text/html") {.gcsafe.} =
   var headers: HttpHeaders
   headers["Content-Type"] = contentType & "; charset=utf-8"
   headers["Cache-Control"] = "public, max-age=3600"
   request.respond(200, headers, content)
-
-proc pageHome(request: Request) = serveStatic(request, homePage())
-proc pageDocs(request: Request) = serveStatic(request, docsPage())
-proc pagePlayground(request: Request) = serveStatic(request, playgroundPage())
 
 proc staticFile(request: Request) =
   let path = "web/static" / request.uri.replace("/static/", "")
@@ -168,10 +164,29 @@ proc staticFile(request: Request) =
 # Router
 # ---------------------------------------------------------------------------
 
+initExamples()
+
+# Pre-render pages (before Mummy starts threads)
+var cachedHome {.global.} = ""
+var cachedDocs {.global.} = ""
+var cachedPlayground {.global.} = ""
+cachedHome = homePage()
+cachedDocs = docsPage()
+cachedPlayground = playgroundPage()
+
+proc serveCachedHome(request: Request) =
+  {.cast(gcsafe).}: serveStatic(request, cachedHome)
+proc serveCachedDocs(request: Request) =
+  {.cast(gcsafe).}: serveStatic(request, cachedDocs)
+proc serveCachedPlayground(request: Request) =
+  {.cast(gcsafe).}: serveStatic(request, cachedPlayground)
+
 var router: Router
-router.addRoute("GET", "/", pageHome)
-router.addRoute("GET", "/docs", pageDocs)
-router.addRoute("GET", "/playground", pagePlayground)
+router.addRoute("GET", "/", serveCachedHome)
+router.addRoute("GET", "/docs", serveCachedDocs)
+router.addRoute("GET", "/docs/", serveCachedDocs)
+router.addRoute("GET", "/playground", serveCachedPlayground)
+router.addRoute("GET", "/playground/", serveCachedPlayground)
 router.addRoute("GET", "/static/*", staticFile)
 router.addRoute("POST", "/api/render", apiRender)
 router.addRoute("POST", "/api/check", apiCheck)
