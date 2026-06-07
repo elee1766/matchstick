@@ -27,3 +27,7 @@ task test, "Run all tests":
 
 task web, "Build the web frontend":
   exec "nim c -d:release -o:matchstick_web web/server.nim"
+
+task webrun, "Build and run the web frontend":
+  exec "nim c -d:release -o:matchstick_web web/server.nim"
+  exec "./matchstick_web"
