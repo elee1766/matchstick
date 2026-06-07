@@ -1,10 +1,9 @@
 ## nftables_ffi.nim - nftables interaction via the `nft` CLI.
 ##
-## Shells out to the `nft` binary for validation and application.
-## No library dependency -- just needs `nft` in PATH for apply/diff commands.
+## Uses execProcess with explicit argument arrays -- no shell interpolation.
 ## render/check/show commands work without nft installed.
 
-import std/[osproc, strutils]
+import std/[osproc, os, tempfiles, streams]
 
 type
   NftResult* = object
@@ -13,14 +12,10 @@ type
     error*: string
 
 proc findNft(): string =
-  ## Find the nft binary. Returns empty string if not found.
-  let (output, exitCode) = execCmdEx("which nft 2>/dev/null")
-  if exitCode == 0:
-    return output.strip()
-  # Common paths
-  for path in ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]:
-    let (_, ec) = execCmdEx("test -x " & path)
-    if ec == 0: return path
+  let path = findExe("nft")
+  if path != "": return path
+  for p in ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]:
+    if fileExists(p): return p
   return ""
 
 proc ensureNft(): string =
@@ -32,9 +27,13 @@ proc ensureNft(): string =
   return nft
 
 proc nftValidate*(ruleset: string): NftResult =
-  ## Validate a text ruleset via `nft -c -f -` (dry-run, no root needed in netns).
+  ## Validate a text ruleset via `nft -c -f <tmpfile>` (dry-run).
   let nft = ensureNft()
-  let (output, exitCode) = execCmdEx("echo " & quoteShell(ruleset) & " | " & nft & " -c -f - 2>&1")
+  let (tmpFile, tmpPath) = createTempFile("matchstick_", ".nft")
+  tmpFile.write(ruleset)
+  tmpFile.close()
+  defer: removeFile(tmpPath)
+  let (output, exitCode) = execCmdEx(nft & " -c -f " & quoteShell(tmpPath) & " 2>&1")
   result.success = (exitCode == 0)
   if exitCode == 0:
     result.output = output
@@ -42,9 +41,13 @@ proc nftValidate*(ruleset: string): NftResult =
     result.error = output
 
 proc nftApply*(ruleset: string): NftResult =
-  ## Apply a text ruleset via `nft -f -`. Requires root.
+  ## Apply a text ruleset via `nft -f <tmpfile>`. Requires root.
   let nft = ensureNft()
-  let (output, exitCode) = execCmdEx("echo " & quoteShell(ruleset) & " | " & nft & " -f - 2>&1")
+  let (tmpFile, tmpPath) = createTempFile("matchstick_", ".nft")
+  tmpFile.write(ruleset)
+  tmpFile.close()
+  defer: removeFile(tmpPath)
+  let (output, exitCode) = execCmdEx(nft & " -f " & quoteShell(tmpPath) & " 2>&1")
   result.success = (exitCode == 0)
   if exitCode == 0:
     result.output = output
@@ -53,9 +56,13 @@ proc nftApply*(ruleset: string): NftResult =
 
 proc nftListTable*(family, name: string): NftResult =
   ## List a specific table from the running ruleset.
+  ## Uses execProcess with argument array -- no shell interpolation.
   let nft = ensureNft()
-  let cmd = nft & " list table " & family & " " & name & " 2>&1"
-  let (output, exitCode) = execCmdEx(cmd)
+  let p = startProcess(nft, args = @["list", "table", family, name],
+                       options = {poUsePath, poStdErrToStdOut})
+  let output = p.outputStream.readAll()
+  let exitCode = p.waitForExit()
+  p.close()
   result.success = (exitCode == 0)
   if exitCode == 0:
     result.output = output

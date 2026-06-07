@@ -13,6 +13,17 @@
 import std/[strutils, tables]
 import ./types
 
+const sysctlKeyChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '.'}
+
+proc isValidSysctlKey*(key: string): bool =
+  ## Validate that a sysctl key contains only safe characters.
+  ## Prevents path traversal (e.g. "../../etc/shadow").
+  if key.len == 0 or key.len > 256: return false
+  if key.startsWith(".") or key.endsWith(".") or ".." in key: return false
+  for c in key:
+    if c notin sysctlKeyChars: return false
+  return true
+
 type
   SysctlSet* = object
     entries*: seq[SysctlEntry]
@@ -123,7 +134,14 @@ proc applySysctls*(sysctls: SysctlSet): seq[string] =
   ## Write sysctl values to /proc/sys/. Returns list of errors (empty = success).
   var errors: seq[string]
   for entry in sysctls.entries:
+    if not isValidSysctlKey(entry.key):
+      errors.add entry.key & ": invalid sysctl key (must be alphanumeric with dots)"
+      continue
     let path = "/proc/sys/" & entry.key.replace('.', '/')
+    # Final safety check: resolved path must be under /proc/sys/
+    if ".." in path:
+      errors.add entry.key & ": path traversal detected"
+      continue
     try:
       writeFile(path, entry.value & "\n")
     except IOError as e:

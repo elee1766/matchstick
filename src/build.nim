@@ -503,8 +503,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
             for port in dnat.port: entries.add ServiceEntry(proto: proto, port: port)
         for entry in entries:
           var stmts: seq[Stmt]
-          for iface in dnat.iface.interfaces:
-            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(iface))
+          # Match ANY interface in the zone (OR, not AND)
+          if dnat.iface.interfaces.len == 1:
+            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(dnat.iface.interfaces[0]))
+          elif dnat.iface.interfaces.len > 1:
+            stmts.add matchStmt(opEq, metaExpr("iifname"),
+              anonSetExpr(dnat.iface.interfaces.mapIt(strExpr(it))))
           if dnat.daddr != "" and isIpv4(dnat.daddr):
             stmts.add matchStmt(opEq, payloadExpr("ip", "daddr"), strExpr(dnat.daddr))
           if entry.proto notin ["icmp", "icmpv6"]:
@@ -517,8 +521,11 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       for redir in state.redirectRules:
         for proto in redir.proto:
           var stmts: seq[Stmt]
-          for iface in redir.iface.interfaces:
-            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(iface))
+          if redir.iface.interfaces.len == 1:
+            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(redir.iface.interfaces[0]))
+          elif redir.iface.interfaces.len > 1:
+            stmts.add matchStmt(opEq, metaExpr("iifname"),
+              anonSetExpr(redir.iface.interfaces.mapIt(strExpr(it))))
           let portExprs = redir.port.mapIt(parsePortExpr(it))
           if portExprs.len == 1:
             stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExprs[0])

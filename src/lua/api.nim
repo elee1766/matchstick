@@ -3,10 +3,48 @@
 ## Each method is a LuaCFunction that retrieves FirewallState from the
 ## Lua registry and operates on it. setupLuaVM registers them all.
 
-import std/[os, options, tables, json]
+import std/[os, options, tables, json, strutils]
 import ./ffi
 import ./helpers
 import ../types
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+const
+  maxNameLen = 64
+  maxStringLen = 256
+  maxPortVal = 65535
+  maxConnLimit = 1000000
+  hexChars = {'0'..'9', 'a'..'f', 'A'..'F'}
+  sysctlKeyChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '.'}
+
+proc checkLen(L: LuaState, s: string, maxLen: int, ctx: string) =
+  if s.len > maxLen:
+    discard luaL_error(L, "%s: value too long (%d chars, max %d)", ctx.cstring, s.len.cint, maxLen.cint)
+
+proc checkIdent(L: LuaState, s: string, ctx: string) =
+  ## Validate identifier: 1-64 chars, alphanumeric + hyphen + underscore.
+  if s.len == 0 or s.len > maxNameLen:
+    discard luaL_error(L, "%s: name must be 1-%d chars, got %d", ctx.cstring, maxNameLen.cint, s.len.cint)
+  for c in s:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}:
+      discard luaL_error(L, "%s: invalid character '%c' (alphanumeric, hyphen, underscore only)", ctx.cstring, c)
+
+proc checkIface(L: LuaState, s: string, ctx: string) =
+  ## Validate interface name: 1-15 chars, alphanumeric + hyphen + underscore + dot + plus (wildcard).
+  if s.len == 0 or s.len > 15:
+    discard luaL_error(L, "%s: interface name must be 1-15 chars, got '%s'", ctx.cstring, s.cstring)
+  for c in s:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '.', '+'}:
+      discard luaL_error(L, "%s: invalid character '%c' in interface name", ctx.cstring, c)
+
+proc checkNoShellMeta(L: LuaState, s: string, ctx: string) =
+  ## Reject shell metacharacters that could enable injection.
+  for c in s:
+    if c in {';', '|', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r', '\0'}:
+      discard luaL_error(L, "%s: contains unsafe character '%c'", ctx.cstring, c)
 
 # ---------------------------------------------------------------------------
 # fw:zone(name, iface?, opts?)
@@ -16,8 +54,8 @@ proc fwZone(L: LuaState): cint {.cdecl.} =
   let state = getState(L)
   let line = getCurrentLine(L)
 
-  # arg 1 is self (the fw table), arg 2 is name
   let name = $luaL_checkstring(L, 2)
+  checkIdent(L, name, "fw:zone")
 
   # Check name collision
   try:
@@ -29,7 +67,9 @@ proc fwZone(L: LuaState): cint {.cdecl.} =
 
   # arg 3: interface(s) -- string, array of strings, or absent (fw zone)
   if lua_type(L, 3) == LUA_TSTRING:
-    zone.interfaces = @[$lua_tostring(L, 3)]
+    let iface = $lua_tostring(L, 3)
+    checkIface(L, iface, "fw:zone '" & name & "'")
+    zone.interfaces = @[iface]
   elif lua_istable(L, 3):
     # Could be an array of strings (interfaces) or an options table
     # Check if it has string keys (options) or integer keys (array)
@@ -62,6 +102,7 @@ proc fwHost(L: LuaState): cint {.cdecl.} =
   let line = getCurrentLine(L)
 
   let name = $luaL_checkstring(L, 2)
+  checkIdent(L, name, "fw:host")
   luaL_checktype(L, 3, LUA_TTABLE)
 
   try:
@@ -79,6 +120,8 @@ proc fwHost(L: LuaState): cint {.cdecl.} =
   let addr4 = getStringField(L, 3, "addr")
   if addr4 == "":
     discard luaL_error(L, "fw:host '%s': missing 'addr' field", name.cstring)
+  checkLen(L, addr4, 45, "fw:host '" & name & "' addr")  # max IPv6 length
+  checkNoShellMeta(L, addr4, "fw:host '" & name & "' addr")
 
   var host = Host(
     name: name,
@@ -267,15 +310,41 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
       rule.proto = getStringArrayField(L, 5, "proto")
       rule.port = getStringArrayField(L, 5, "port")
       rule.saddrList = getStringField(L, 5, "saddr_list")
+      if rule.saddrList != "":
+        checkIdent(L, rule.saddrList, "fw:rule saddr_list")
       rule.daddrList = getStringField(L, 5, "daddr_list")
-      rule.macAddr = getStringField(L, 5, "mac")
-      rule.connLimit = getIntField(L, 5, "connlimit", 0)
+      if rule.daddrList != "":
+        checkIdent(L, rule.daddrList, "fw:rule daddr_list")
+
+      let mac = getStringField(L, 5, "mac")
+      if mac != "":
+        # Validate MAC format: aa:bb:cc:dd:ee:ff (17 chars, hex pairs with colons)
+        var validMac = mac.len == 17
+        if validMac:
+          for i, c in mac:
+            if i mod 3 == 2:
+              if c != ':': validMac = false; break
+            else:
+              if c notin hexChars: validMac = false; break
+        if not validMac:
+          discard luaL_error(L, "fw:rule: invalid MAC address '%s' (expected aa:bb:cc:dd:ee:ff)", mac.cstring)
+        rule.macAddr = mac
+
+      let cl = getIntField(L, 5, "connlimit", 0)
+      if cl < 0 or cl > maxConnLimit:
+        discard luaL_error(L, "fw:rule: connlimit must be 0-%d, got %d", maxConnLimit.cint, cl.cint)
+      rule.connLimit = cl
+
       rule.log = getStringField(L, 5, "log")
+      if rule.log != "":
+        checkLen(L, rule.log, maxStringLen, "fw:rule log")
+        checkNoShellMeta(L, rule.log, "fw:rule log")
 
       # Raw daddr (IP string for forward rules to specific destinations)
       let rawDaddr = getStringField(L, 5, "daddr")
       if rawDaddr != "":
-        # Could be a host handle name or raw IP
+        checkLen(L, rawDaddr, 45, "fw:rule daddr")
+        checkNoShellMeta(L, rawDaddr, "fw:rule daddr")
         if rawDaddr in state.hosts:
           rule.daddrRaw = state.hosts[rawDaddr].addr4
         else:
@@ -415,12 +484,18 @@ proc fwDocker(L: LuaState): cint {.cdecl.} =
 # fw:config({ table_name = ..., priority_offset = ..., ... })
 # ---------------------------------------------------------------------------
 
+const
+  validPolicies = ["accept", "drop"]
+  validFamilies = ["inet", "ip"]
+
 proc fwConfig(L: LuaState): cint {.cdecl.} =
   let state = getState(L)
   luaL_checktype(L, 2, LUA_TTABLE)
 
   let tn = getStringField(L, 2, "table_name")
-  if tn != "": state.config.tableName = tn
+  if tn != "":
+    checkIdent(L, tn, "fw:config table_name")
+    state.config.tableName = tn
 
   let po = getIntField(L, 2, "priority_offset", state.config.priorityOffset)
   state.config.priorityOffset = po
@@ -429,29 +504,52 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
   if lr != "": state.config.logRate = lr
 
   let lp = getStringField(L, 2, "log_prefix")
-  if lp != "": state.config.logPrefix = lp
+  if lp != "":
+    # Validate no nftables-breaking characters
+    for c in lp:
+      if c in {'"', '\\', '\n', '\r'}:
+        discard luaL_error(L, "fw:config: log_prefix must not contain quotes, backslashes, or newlines")
+    state.config.logPrefix = lp
 
   let ll = getStringField(L, 2, "log_level")
   if ll != "": state.config.logLevel = ll
 
   let fam = getStringField(L, 2, "family")
-  if fam != "": state.config.family = fam
+  if fam != "":
+    if fam notin validFamilies:
+      discard luaL_error(L, "fw:config: family must be 'inet' or 'ip', got '%s'", fam.cstring)
+    state.config.family = fam
 
   state.config.logSetSize = getIntField(L, 2, "log_set_size", state.config.logSetSize)
   state.config.logSetTimeout = getIntField(L, 2, "log_set_timeout", state.config.logSetTimeout)
   state.config.counter = getBoolField(L, 2, "counter", state.config.counter)
 
   let ip = getStringField(L, 2, "input_policy")
-  if ip != "": state.config.inputPolicy = ip
+  if ip != "":
+    if ip notin validPolicies:
+      discard luaL_error(L, "fw:config: input_policy must be 'accept' or 'drop', got '%s'", ip.cstring)
+    state.config.inputPolicy = ip
 
   let op = getStringField(L, 2, "output_policy")
-  if op != "": state.config.outputPolicy = op
+  if op != "":
+    if op notin validPolicies:
+      discard luaL_error(L, "fw:config: output_policy must be 'accept' or 'drop', got '%s'", op.cstring)
+    state.config.outputPolicy = op
 
   return 0
 
 # ---------------------------------------------------------------------------
 # fw:sysctl(key, value) or fw:sysctl({ key = value, ... })
 # ---------------------------------------------------------------------------
+
+proc validateSysctlKey(L: LuaState, key: string) =
+  if key.len == 0 or key.len > 256:
+    discard luaL_error(L, "fw:sysctl: key must be 1-256 chars, got %d", key.len.cint)
+  for c in key:
+    if c notin sysctlKeyChars:
+      discard luaL_error(L, "fw:sysctl: key '%s' contains invalid character '%c' (alphanumeric, underscore, dots only)", key.cstring, c)
+  if key.startsWith(".") or key.endsWith(".") or ".." in key:
+    discard luaL_error(L, "fw:sysctl: key '%s' has invalid dot placement", key.cstring)
 
 proc fwSysctl(L: LuaState): cint {.cdecl.} =
   ## fw:sysctl("key", "value")  -- set a sysctl
@@ -461,6 +559,7 @@ proc fwSysctl(L: LuaState): cint {.cdecl.} =
 
   if lua_type(L, 2) == LUA_TSTRING:
     let key = $luaL_checkstring(L, 2)
+    validateSysctlKey(L, key)
     if lua_isboolean(L, 3) and lua_toboolean(L, 3) == 0:
       # fw:sysctl("key", false) -- unset
       state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
@@ -477,6 +576,7 @@ proc fwSysctl(L: LuaState): cint {.cdecl.} =
     while lua_next(L, 2) != 0:
       if lua_type(L, -2) == LUA_TSTRING:
         let key = $lua_tostring(L, -2)
+        validateSysctlKey(L, key)
         if lua_isboolean(L, -1) and lua_toboolean(L, -1) == 0:
           state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
         elif lua_type(L, -1) == LUA_TSTRING:

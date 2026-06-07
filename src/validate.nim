@@ -24,13 +24,25 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
   var msgs: seq[ValidationMsg]
 
   # ------------------------------------------------------------------
-  # Check: zones must have interfaces (except fw zone)
+  # Check: exactly one fw zone (no interfaces) must exist
   # ------------------------------------------------------------------
+  var fwZoneCount = 0
   for name, zone in state.zones:
     if zone.interfaces.len == 0:
-      # This is the fw zone -- make sure it exists
-      discard
-    # Check for duplicate interfaces across zones
+      fwZoneCount += 1
+  if fwZoneCount == 0:
+    msgs.add ValidationMsg(severity: svError,
+      msg: "no fw zone defined (need exactly one zone with no interfaces, e.g. fw:zone(\"fw\"))",
+      line: 0)
+  elif fwZoneCount > 1:
+    msgs.add ValidationMsg(severity: svError,
+      msg: "multiple fw zones defined (only one zone with no interfaces is allowed)",
+      line: 0)
+
+  # ------------------------------------------------------------------
+  # Check: duplicate interfaces across zones
+  # ------------------------------------------------------------------
+  for name, zone in state.zones:
     for name2, zone2 in state.zones:
       if name == name2: continue
       for iface in zone.interfaces:
@@ -132,8 +144,40 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
   for rule in state.rules:
     if rule.saddrList != "" and rule.saddrList notin state.ipLists:
       msgs.add ValidationMsg(severity: svError,
-        msg: "rule references unknown iplist \"" & rule.saddrList & "\"",
+        msg: "rule references unknown iplist (saddr_list) \"" & rule.saddrList & "\"",
         line: rule.line)
+    if rule.daddrList != "" and rule.daddrList notin state.ipLists:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "rule references unknown iplist (daddr_list) \"" & rule.daddrList & "\"",
+        line: rule.line)
+
+  # ------------------------------------------------------------------
+  # Check: connlimit must be positive if set
+  # ------------------------------------------------------------------
+  for rule in state.rules:
+    if rule.connLimit < 0:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "rule has negative connlimit: " & $rule.connLimit,
+        line: rule.line)
+
+  # ------------------------------------------------------------------
+  # Check: redirect rules
+  # ------------------------------------------------------------------
+  for redir in state.redirectRules:
+    if redir.iface == nil:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "fw:redirect: missing iface", line: redir.line)
+    elif redir.iface.interfaces.len == 0:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "fw:redirect: zone \"" & redir.iface.name & "\" has no interfaces",
+        line: redir.line)
+    if redir.destPort < 1 or redir.destPort > 65535:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "fw:redirect: dest_port out of range (1-65535): " & $redir.destPort,
+        line: redir.line)
+    if redir.proto.len == 0:
+      msgs.add ValidationMsg(severity: svError,
+        msg: "fw:redirect: missing proto", line: redir.line)
 
   # ------------------------------------------------------------------
   # Check: DNAT rules should have corresponding forward ACCEPT rules

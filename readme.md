@@ -74,18 +74,6 @@ matchstick show topology firewall.lua --format=d2   # D2 diagram
 matchstick show json     firewall.lua               # full state as JSON
 ```
 
-### Visualization
-
-```
-  src \ dst fw        wan       lan
-  ------------------------------------
-  fw        --        ACPT      ACPT
-  wan       * DROP 2r --        drop
-  lan       ACPT 3r   ACPT      --
-
-  ACPT=accept  DROP=drop  *=logged  Nr=N rules
-```
-
 ## Build
 
 ```sh
