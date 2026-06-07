@@ -38,9 +38,7 @@ fw:rule(wan, self, "accept", ping)
 fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })"""
 
     p:
-      a(href=bp & "/playground/"): button: text "try it"
-      text " "
-      a(href=bp & "/docs/"): button(`data-variant`="soft"): text "documentation"
+      a(href=bp & "/docs/"): button: text "documentation"
 
     hr()
 

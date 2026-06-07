@@ -4,21 +4,6 @@
 body > header { flex-wrap: nowrap; }
 body > header button { padding: 0.125rem 0.5rem; font-size: var(--tux-text-xs); line-height: 1.5; }
 
-/* toolbar */
-.pg-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.5rem;
-}
-.pg-toolbar h2 { margin: 0; }
-.pg-actions {
-  display: flex;
-  gap: 0.25rem;
-  align-items: center;
-}
-.pg-actions select { width: auto; }
-
 /* docs layout — sidebar + content */
 .docs-layout {
   display: flex;
@@ -110,44 +95,4 @@ p, h1, h2, h3, h4, pre, table, ul, ol, dl { text-align: left; }
 @media (max-width: 768px) {
   .docs-layout { flex-direction: column; }
   .docs-toc { position: static; width: 100%; min-width: 0; max-height: none; }
-}
-
-/* playground layout */
-.pg-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.5rem;
-}
-@media (max-width: 768px) {
-  .pg-grid { grid-template-columns: 1fr; }
-}
-.pg-grid textarea {
-  width: 100%;
-  min-height: 400px;
-  white-space: pre;
-  overflow-wrap: normal;
-  overflow-x: auto;
-  margin: 0;
-}
-.pg-output {
-  max-height: 70vh;
-  min-height: 400px;
-  overflow: auto;
-  margin: 0;
-}
-.pg-controls {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0.25rem 0.5rem;
-  border-top: 1px solid var(--tux-border-subtle);
-  align-items: center;
-}
-.pg-controls select {
-  width: auto;
-}
-.pg-badge {
-  font-size: var(--tux-text-micro, 10px);
-  color: var(--tux-text-muted, #888);
-  padding: 0.1rem 0.4rem;
-  border: 1px solid var(--tux-border, #444);
 }

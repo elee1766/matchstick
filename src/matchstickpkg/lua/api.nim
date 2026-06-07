@@ -501,7 +501,10 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
   state.config.priorityOffset = po
 
   let lr = getStringField(L, 2, "log_rate")
-  if lr != "": state.config.logRate = lr
+  if lr != "":
+    checkLen(L, lr, maxStringLen, "fw:config log_rate")
+    checkNoShellMeta(L, lr, "fw:config log_rate")
+    state.config.logRate = lr
 
   let lp = getStringField(L, 2, "log_prefix")
   if lp != "":

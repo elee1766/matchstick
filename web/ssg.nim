@@ -4,8 +4,6 @@
 import std/[os]
 import ./pages/docs
 import ./pages/home
-import ./pages/docs
-import ./pages/playground
 
 const outDir = "dist"
 
@@ -23,7 +21,6 @@ proc main() =
   # Pages — directory-based so /docs/ resolves to /docs/index.html
   writeFile(outDir / "index.html", homePage())
   writePage("docs", docsPage())
-  writePage("playground", playgroundPage())
 
   # Static assets
   for f in walkDir("web/static"):

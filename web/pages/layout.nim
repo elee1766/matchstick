@@ -25,7 +25,6 @@ proc layout*(title: string, content: VNode): string =
         nav:
           a(href=bp & "/"): text "home"
           a(href=bp & "/docs/"): text "docs"
-          a(href=bp & "/playground/"): text "playground"
           a(href="https://github.com/elee1766/matchstick", target="_blank"): text "github"
           button(id="theme-toggle", `data-variant`="ghost"): text "theme"
       main:
