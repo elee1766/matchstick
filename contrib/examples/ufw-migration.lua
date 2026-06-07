@@ -94,8 +94,8 @@ fw:rule(lan, self, "accept", vnc)
 -- WS-Discovery from LAN (UFW: 3702/udp ALLOW 192.168.0.0/16)
 fw:rule(lan, self, "accept", { proto = "udp", port = "3702" })
 
--- NoiseTorch / virtual mic (UFW: 4010/udp ALLOW Anywhere)
-fw:rule(lan, self, "accept", { proto = "udp", port = "4010" })
+-- Scream audio from winbox only (was: 4010/udp ALLOW Anywhere)
+fw:rule(winbox, self, "accept", { proto = "udp", port = "4010" })
 
 -- Custom app (UFW: 42069/udp+tcp ALLOW Anywhere)
 fw:rule(lan, self, "accept", app_udp_tcp)
