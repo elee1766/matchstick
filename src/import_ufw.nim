@@ -6,7 +6,7 @@
 ##   sudo ufw show added | matchstick import-ufw
 ##   matchstick import-ufw < ufw-rules.txt
 
-import std/[strutils, sequtils, tables, sets, os, options]
+import std/[strutils, sequtils, tables, sets, os, options, hashes]
 
 type
   UfwAction = enum
@@ -197,10 +197,20 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
       if proto != "": name &= "_" & proto
       name
 
-  # Build service variable map
+  # Build service variable map, deduplicating same port with/without proto
   var svcMap: OrderedTable[PortProto, string]
+  var usedSvcNames: HashSet[string]
   for pp in portProtos:
-    svcMap[pp] = serviceName(pp.port, pp.proto)
+    var name = serviceName(pp.port, pp.proto)
+    # If this name is already used (e.g. dhcp_server for 67/udp and 67/),
+    # disambiguate or skip
+    if name in usedSvcNames:
+      if pp.proto == "":
+        name &= "_any"
+      else:
+        name &= "_" & pp.proto
+    svcMap[pp] = name
+    usedSvcNames.incl name
 
   # Emit services
   lines.add "---------------------------------------------------------------------------"
@@ -245,14 +255,19 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
   # Emit hosts for single IP sources
   var hostNames: OrderedTable[string, string]
   var subnetAddrs: seq[string]
+  var usedHostNames: HashSet[string]
 
-  for addr in sourceAddrs:
-    if "/" in addr:
-      subnetAddrs.add addr
+  for srcAddr in sourceAddrs:
+    if "/" in srcAddr:
+      subnetAddrs.add srcAddr
     else:
-      let octets = addr.split(".")
-      let name = "host_" & octets[^1]
-      hostNames[addr] = name
+      let octets = srcAddr.split(".")
+      var name = "host_" & octets[^1]
+      # Disambiguate if same last octet from different subnets
+      if name in usedHostNames:
+        name = "host_" & octets[^2] & "_" & octets[^1]
+      hostNames[srcAddr] = name
+      usedHostNames.incl name
 
   if hostNames.len > 0 or subnetAddrs.len > 0:
     lines.add "---------------------------------------------------------------------------"
