@@ -84,6 +84,10 @@ body > header button { padding: 0.125rem 0.5rem; font-size: var(--tux-text-xs); 
 .docs-content h3 { margin-top: 1rem; }
 .docs-content h2:first-child { margin-top: 0; }
 
+/* left-align everything */
+main { text-align: left; }
+p, h1, h2, h3, h4, pre, table, ul, ol, dl { text-align: left; }
+
 /* scroll offset for anchors behind sticky header */
 :target { scroll-margin-top: 3rem; }
 
