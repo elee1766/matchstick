@@ -1,7 +1,7 @@
 ## Test nft_ir module: expression and statement construction
 
 import unittest
-import ../src/nft_ir
+import ../src/matchstickpkg/nft_ir
 
 suite "Expr constructors":
   test "string expr":

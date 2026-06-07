@@ -2,9 +2,9 @@
 
 import unittest
 import std/[strutils]
-import ../src/nft_ir
-import ../src/emit_text
-import ../src/writer
+import ../src/matchstickpkg/nft_ir
+import ../src/matchstickpkg/emit_text
+import ../src/matchstickpkg/writer
 
 suite "Expr toText: all variants":
   test "string": check strExpr("eth0").toText == "eth0"

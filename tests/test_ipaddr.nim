@@ -1,7 +1,7 @@
 ## Test ipaddr module: CIDR normalization, IPv4 parsing
 
 import unittest
-import ../src/ipaddr
+import ../src/matchstickpkg/ipaddr
 
 suite "IPv4 parsing":
   test "basic addresses":

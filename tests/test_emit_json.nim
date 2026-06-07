@@ -2,8 +2,8 @@
 
 import unittest
 import std/json
-import ../src/nft_ir
-import ../src/emit_json
+import ../src/matchstickpkg/nft_ir
+import ../src/matchstickpkg/emit_json
 
 suite "Expr JSON: literals":
   test "string": check strExpr("eth0").toJsonNode().getStr == "eth0"

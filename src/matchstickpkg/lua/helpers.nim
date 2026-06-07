@@ -4,7 +4,7 @@
 ## handle push, endpoint/service/host resolution, action parsing.
 
 import std/[options, tables, strutils, json]
-import ./ffi
+import ../../lua54/ffi
 import ../types
 
 const

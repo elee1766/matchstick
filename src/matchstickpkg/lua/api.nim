@@ -4,7 +4,7 @@
 ## Lua registry and operates on it. setupLuaVM registers them all.
 
 import std/[os, options, tables, json, strutils]
-import ./ffi
+import ../../lua54/ffi
 import ./helpers
 import ../types
 

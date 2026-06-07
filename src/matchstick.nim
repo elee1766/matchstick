@@ -1,16 +1,16 @@
 ## matchstick - Lua-based nftables firewall configuration tool
 
 import std/[os, strformat, options, tables, parseopt, strutils]
-import ./lua/ffi
-import ./types
-import ./lua/api
-import ./build
-import ./emit_text
-import ./emit_json
-import ./validate
-import ./show
-import ./sysctl
-import ./import_ufw
+import ./lua54/ffi
+import ./matchstickpkg/types
+import ./matchstickpkg/lua/api
+import ./matchstickpkg/build
+import ./matchstickpkg/emit_text
+import ./matchstickpkg/emit_json
+import ./matchstickpkg/validate
+import ./matchstickpkg/show
+import ./matchstickpkg/sysctl
+import ./matchstickpkg/import_ufw
 
 when not defined(noSystem):
   import experimental/diff
