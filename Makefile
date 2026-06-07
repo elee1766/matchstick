@@ -23,6 +23,8 @@ install: build
 	install -d $(DESTDIR)$(SYSCONFDIR)/matchstick
 	install -d $(DESTDIR)$(SHAREDIR)/examples
 	install -m 644 contrib/examples/*.lua $(DESTDIR)$(SHAREDIR)/examples/
+	install -d $(DESTDIR)$(SHAREDIR)/luals
+	install -m 644 contrib/luals/matchstick.lua $(DESTDIR)$(SHAREDIR)/luals/
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
