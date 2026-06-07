@@ -1,4 +1,4 @@
-## Playground page — edit Lua, see nftables output.
+## Playground page — live check on edit, render on demand.
 
 import karax/[karaxdsl, vdom]
 import ./layout
@@ -23,65 +23,91 @@ fw:rule(wan, self, "accept", ping)
 
 proc playgroundPage*(): string =
   let content = buildHtml(tdiv):
-    h1: text "playground"
-    p: text "edit the lua config and see the generated nftables output."
+    tdiv(class="pg-toolbar"):
+      h2: text "playground"
+      tdiv(class="pg-actions"):
+        button(id="btn-render"): text "render"
+        select(id="output-format"):
+          option(value="text", selected="selected"): text "nftables text"
+          option(value="json"): text "nftables json"
+          option(value="sysctl"): text "sysctl"
 
     tdiv(class="pg-grid"):
       section:
-        header:
-          text "firewall.lua"
-        textarea(id="config-input", rows="24", spellcheck="false",
+        header: text "firewall.lua"
+        textarea(id="config-input", rows="28", spellcheck="false",
                  autocomplete="off", autocorrect="off", autocapitalize="off"):
           text defaultConfig
-        tdiv(class="pg-controls"):
-          button(id="btn-render"): text "render"
-          button(id="btn-check", `data-variant`="soft"): text "check"
-          select(id="output-format"):
-            option(value="text", selected="selected"): text "nftables text"
-            option(value="json"): text "nftables json"
-            option(value="sysctl"): text "sysctl"
 
       section:
-        header: text "output"
+        header:
+          span(id="check-status"): text "check"
         pre(id="output", class="pg-output"):
           code(id="output-code"):
-            text "click render to see output..."
+            text ""
 
     verbatim """
 <script>
-document.getElementById('btn-render').addEventListener('click', async () => {
-  const config = document.getElementById('config-input').value;
-  const format = document.getElementById('output-format').value;
-  const out = document.getElementById('output-code');
-  out.textContent = 'rendering...';
-  try {
-    const resp = await fetch('/api/render', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config, format}),
-    });
-    const data = await resp.json();
-    out.textContent = data.error ? 'error:\n' + data.error : data.output;
-  } catch (e) {
-    out.textContent = 'request failed: ' + e.message;
-  }
+var checkTimer = null;
+var lastConfig = '';
+
+function doCheck() {
+  var config = document.getElementById('config-input').value;
+  if (config === lastConfig) return;
+  lastConfig = config;
+  var status = document.getElementById('check-status');
+  var out = document.getElementById('output-code');
+  status.textContent = 'checking...';
+  fetch('/api/check', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({config: config}),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.error) {
+      status.textContent = 'error';
+      out.textContent = data.error;
+    } else {
+      var ok = data.output.indexOf('ok') !== -1;
+      status.textContent = ok ? 'ok' : 'errors';
+      out.textContent = data.output;
+    }
+  }).catch(function(e) {
+    status.textContent = 'error';
+    out.textContent = e.message;
+  });
+}
+
+document.getElementById('config-input').addEventListener('input', function() {
+  clearTimeout(checkTimer);
+  checkTimer = setTimeout(doCheck, 400);
 });
-document.getElementById('btn-check').addEventListener('click', async () => {
-  const config = document.getElementById('config-input').value;
-  const out = document.getElementById('output-code');
-  out.textContent = 'checking...';
-  try {
-    const resp = await fetch('/api/check', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config}),
-    });
-    const data = await resp.json();
-    out.textContent = data.error ? 'error:\n' + data.error : data.output;
-  } catch (e) {
-    out.textContent = 'request failed: ' + e.message;
-  }
+
+document.getElementById('btn-render').addEventListener('click', function() {
+  var config = document.getElementById('config-input').value;
+  var format = document.getElementById('output-format').value;
+  var status = document.getElementById('check-status');
+  var out = document.getElementById('output-code');
+  status.textContent = 'rendering...';
+  fetch('/api/render', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({config: config, format: format}),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.error) {
+      status.textContent = 'error';
+      out.textContent = data.error;
+    } else {
+      status.textContent = 'rendered';
+      out.textContent = data.output;
+    }
+  }).catch(function(e) {
+    status.textContent = 'error';
+    out.textContent = e.message;
+  });
 });
+
+// initial check on load
+setTimeout(doCheck, 100);
 </script>
 """
 

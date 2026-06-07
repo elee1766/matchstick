@@ -1,5 +1,24 @@
 /* matchstick — overrides for tux.css */
 
+/* header fix: keep single line */
+body > header { flex-wrap: nowrap; }
+body > header button { padding: 0.125rem 0.5rem; font-size: var(--tux-text-xs); line-height: 1.5; }
+
+/* toolbar */
+.pg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.pg-toolbar h2 { margin: 0; }
+.pg-actions {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.pg-actions select { width: auto; }
+
 /* playground layout */
 .pg-grid {
   display: grid;
