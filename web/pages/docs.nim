@@ -1,14 +1,40 @@
-## Documentation page.
+## Documentation page with sidebar TOC.
 
 import karax/[karaxdsl, vdom]
 import ./layout
 
 proc docsPage*(): string =
-  let content = buildHtml(tdiv):
-    h1: text "documentation"
+  let content = buildHtml(tdiv(class="docs-layout")):
+    aside:
+      nav:
+        a(href="#how-it-works"): text "how it works"
+        a(href="#zones"): text "zones"
+        a(href="#hosts"): text "hosts"
+        a(href="#services"): text "services"
+        a(href="#policies"): text "policies"
+        a(href="#rules"): text "rules"
+        a(href="#nat"): text "nat"
+        a(href="#dnat", class="toc-h3"): text "dnat"
+        a(href="#snat", class="toc-h3"): text "snat"
+        a(href="#redirect", class="toc-h3"): text "redirect"
+        a(href="#ip-lists"): text "ip lists"
+        a(href="#packet-hygiene"): text "packet hygiene"
+        a(href="#mss-clamping"): text "mss clamping"
+        a(href="#dhcp"): text "dhcp"
+        a(href="#docker"): text "docker"
+        a(href="#sysctl"): text "sysctl"
+        a(href="#hooks"): text "hooks"
+        a(href="#includes"): text "includes"
+        a(href="#rate-limiting"): text "rate limiting"
+        a(href="#custom-chains"): text "custom chains"
+        a(href="#raw-nftables"): text "raw nftables"
+        a(href="#global-config"): text "global config"
+        a(href="#cli"): text "cli"
 
-    section:
-      header: text "how it works"
+    tdiv:
+      h1: text "documentation"
+
+      h2(id="how-it-works"): text "how it works"
       p:
         text "matchstick compiles a lua configuration file into nftables rules. "
         text "describe your network in terms of zones, hosts, services, policies, and rules. "
@@ -20,8 +46,7 @@ proc docsPage*(): string =
         text "at apply time, matchstick also derives and sets kernel sysctl parameters "
         text "(ip forwarding, arp hardening, etc.) based on your config."
 
-    section:
-      header: text "zones"
+      h2(id="zones"): text "zones"
       p:
         text "a zone is a group of network interfaces that share the same trust level. "
         text "every config needs exactly one zone with no interfaces — the firewall host itself."
@@ -38,8 +63,7 @@ local internal = fw:zone("internal", {"eth1", "eth2"})
 -- bridge zone
 local dock = fw:zone("dock", "docker0", { bridge = true })"""
 
-    section:
-      header: text "hosts"
+      h2(id="hosts"): text "hosts"
       p:
         text "a host is a specific ip address within a zone. "
         text "use hosts when you need per-machine rules."
@@ -51,8 +75,7 @@ local admin  = fw:host("admin",  { zone = lan, addr = "10.0.0.50" })
 fw:rule(admin, self, "accept", ssh)   -- only admin gets ssh
 fw:rule(server, dmz, "accept", http)  -- server can reach dmz"""
 
-    section:
-      header: text "services"
+      h2(id="services"): text "services"
       p: text "a named protocol + port combination. define once, reuse everywhere."
       pre:
         code:
@@ -68,8 +91,7 @@ local plex = fw:service("plex", {
   {"udp", "32410-32414"},
 })"""
 
-    section:
-      header: text "policies"
+      h2(id="policies"): text "policies"
       p:
         text "the default action for traffic between two zones. "
         text "applies to all traffic that doesn't match a more specific rule."
@@ -83,8 +105,7 @@ fw:policy("*", "*", "reject")                 -- default for everything else"""
         text "actions: \"accept\", \"drop\", \"reject\". "
         text "reject sends icmp admin-prohibited. drop silently discards."
 
-    section:
-      header: text "rules"
+      h2(id="rules"): text "rules"
       p: text "allow or deny specific traffic. evaluated before the zone-pair policy."
       pre:
         code:
@@ -111,9 +132,8 @@ fw:rule(lan, wan, "accept", { daddr_list = "allowed_hosts" })
 -- bare rule (match all traffic)
 fw:rule(guest, self, "drop")"""
 
-    section:
-      header: text "nat"
-      h3: text "dnat (port forwarding)"
+      h2(id="nat"): text "nat"
+      h3(id="dnat"): text "dnat (port forwarding)"
       pre:
         code:
           text """fw:dnat({ iface = wan, service = http, dest = webserver })
@@ -125,19 +145,18 @@ fw:dnat({ iface = wan, proto = "tcp", port = 2222, dest = server, dest_port = 22
 -- hairpin nat
 fw:dnat({ iface = lan, daddr = "203.0.113.1", proto = "tcp", port = {80, 443}, dest = webserver })"""
 
-      h3: text "snat / masquerade"
+      h3(id="snat"): text "snat / masquerade"
       pre:
         code:
           text """fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
 fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })"""
 
-      h3: text "redirect"
+      h3(id="redirect"): text "redirect"
       pre:
         code:
           text """fw:redirect({ iface = lan, proto = "tcp", port = {80}, dest_port = 3128 })"""
 
-    section:
-      header: text "ip lists"
+      h2(id="ip-lists"): text "ip lists"
       p: text "named sets of ip addresses for blocklists, allowlists, geoip, etc."
       pre:
         code:
@@ -148,11 +167,9 @@ fw:iplist("bogons", {
   elements = { "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16" },
 })
 
--- url for auto-refresh (future: matchstick refresh)
 fw:iplist("threats", { type = "ipv4", flags = "timeout", url = "https://example.com/blocklist.txt" })"""
 
-    section:
-      header: text "packet hygiene"
+      h2(id="packet-hygiene"): text "packet hygiene"
       pre:
         code:
           text """fw:laundry({
@@ -165,63 +182,75 @@ fw:iplist("threats", { type = "ipv4", flags = "timeout", url = "https://example.
 fw:exception("invalid", "accept", https)
 fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })"""
 
-    section:
-      header: text "other features"
-      h3: text "mss clamping"
+      h2(id="mss-clamping"): text "mss clamping"
       pre:
         code:
           text """fw:mss_clamp("forward")  -- clamp tcp syn mss to path mtu"""
 
-      h3: text "dhcp"
+      h2(id="dhcp"): text "dhcp"
       pre:
         code:
           text """fw:dhcp(wan, "client")
 fw:dhcp(lan, "server")"""
 
-      h3: text "docker"
+      h2(id="docker"): text "docker"
       pre:
         code:
           text """fw:docker({ bridges = {"docker0", "br-+"} })"""
 
-      h3: text "sysctl"
+      h2(id="sysctl"): text "sysctl"
+      p:
+        text "matchstick automatically derives kernel sysctl settings from your config. "
+        text "ip forwarding is enabled when forwarding rules exist. "
+        text "arp hardening, redirect protection, and source routing protection are always set."
       pre:
         code:
           text """fw:sysctl("net.ipv4.tcp_syncookies", "1")
 
-fw:sysctl({ ["net.netfilter.nf_conntrack_max"] = "262144" })
+fw:sysctl({
+  ["net.netfilter.nf_conntrack_max"] = "262144",
+  ["net.core.somaxconn"] = "4096",
+})
 
--- unset a derived default
+-- unset a derived default (matchstick won't touch it)
 fw:sysctl("net.ipv4.conf.all.forwarding", false)"""
 
-      h3: text "hooks"
+      h2(id="hooks"): text "hooks"
       pre:
         code:
-          text """fw:hook({ post_start = "echo applied" })"""
+          text """fw:hook({
+  pre_start  = "echo starting",
+  post_start = "sysctl -p /etc/sysctl.d/custom.conf",
+})"""
 
-      h3: text "includes"
+      h2(id="includes"): text "includes"
       pre:
         code:
           text """fw:include("services.lua")
 fw:include("rules.lua")"""
 
-      h3: text "rate limiting"
+      h2(id="rate-limiting"): text "rate limiting"
       pre:
         code:
           text """local rate = util:rate("5/minute", { burst = 10 })
-local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })"""
+local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })
 
-      h3: text "custom chains"
+fw:rule(wan, self, "accept", { service = ssh, rate = rate })"""
+
+      h2(id="custom-chains"): text "custom chains"
+      p: text "create chains at arbitrary nftables hook points and priorities. rules are nftables json objects."
       pre:
         code:
           text """fw:chain("prerouting", {
   type = "filter", priority = "mangle",
-  rules = { { { match = { op = "==",
-    left = { meta = { key = "iifname" } }, right = "eth1" } },
+  rules = { {
+    { match = { op = "==", left = { meta = { key = "iifname" } }, right = "eth1" } },
     { mangle = { key = { meta = { key = "mark" } }, value = 256 } },
   } },
 })"""
 
-      h3: text "raw nftables"
+      h2(id="raw-nftables"): text "raw nftables"
+      p: text "escape hatch: inject nftables json command objects directly."
       pre:
         code:
           text """fw:raw_nft({ add = { chain = {
@@ -229,7 +258,7 @@ local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })"""
   type = "filter", hook = "input", prio = 200, policy = "accept",
 } } })"""
 
-      h3: text "global config"
+      h2(id="global-config"): text "global config"
       pre:
         code:
           text """fw:config({
@@ -239,8 +268,7 @@ local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })"""
   counter = false,
 })"""
 
-    section:
-      header: text "cli"
+      h2(id="cli"): text "cli"
       table:
         tbody:
           tr:
