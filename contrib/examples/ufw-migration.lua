@@ -49,10 +49,10 @@ local lan = fw:zone("lan", "eth0")  -- adjust interface name to match your syste
 ---------------------------------------------------------------------------
 -- Hosts (source address filtering -- replaces UFW's "from" clauses)
 ---------------------------------------------------------------------------
-local router    = fw:host("router",    { zone = lan, addr = "192.168.0.1" })
-local steambox1 = fw:host("steambox1", { zone = lan, addr = "192.168.0.27" })
-local steambox2 = fw:host("steambox2", { zone = lan, addr = "192.168.0.110" })
-local steambox3 = fw:host("steambox3", { zone = lan, addr = "192.168.0.111" })
+local router = fw:host("router", { zone = lan, addr = "192.168.0.1" })
+local host27 = fw:host("host27", { zone = lan, addr = "192.168.0.27" })
+local host110 = fw:host("host110", { zone = lan, addr = "192.168.0.110" })
+local host111 = fw:host("host111", { zone = lan, addr = "192.168.0.111" })
 
 ---------------------------------------------------------------------------
 -- Policies (replaces UFW's DEFAULT_*_POLICY)
@@ -105,13 +105,13 @@ fw:rule(lan, self, "accept", app_udp_tcp)
 fw:rule(lan, self, "accept", { proto = "udp", port = "44794" })
 
 -- Steam Remote Play discovery
-fw:rule(steambox1, self, "accept", steam_udp)
-fw:rule(steambox2, self, "accept", steam_udp)
-fw:rule(steambox2, self, "accept", steam_tcp)
-fw:rule(steambox3, self, "accept", steam_udp)
+fw:rule(host27, self, "accept", steam_udp)
+fw:rule(host110, self, "accept", steam_udp)
+fw:rule(host110, self, "accept", steam_tcp)
+fw:rule(host111, self, "accept", steam_udp)
 
--- Steam streaming ports from steambox1 (UFW: 34037:60000/udp ALLOW 192.168.0.27)
-fw:rule(steambox1, self, "accept", { proto = "udp", port = "34037-60000" })
+-- Steam streaming ports (UFW: 34037:60000/udp ALLOW 192.168.0.27)
+fw:rule(host27, self, "accept", { proto = "udp", port = "34037-60000" })
 
 -- RTP/media ports (UFW: 52000:52100/udp ALLOW Anywhere)
 fw:rule(lan, self, "accept", { proto = "udp", port = "52000-52100" })
