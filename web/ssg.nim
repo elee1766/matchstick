@@ -30,6 +30,9 @@ proc main() =
     if f.kind == pcFile:
       copyFile(f.path, outDir / "static" / f.path.extractFilename)
 
+  # Copy llms.txt to root
+  copyFile("web/static/llms.txt", outDir / "llms.txt")
+
   # GitHub Pages needs .nojekyll to serve _ prefixed files
   writeFile(outDir / ".nojekyll", "")
 
