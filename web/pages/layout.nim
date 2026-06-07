@@ -2,7 +2,10 @@
 
 import karax/[karaxdsl, vdom]
 
+var basePath* = ""  ## set to "/matchstick" for GitHub Pages, "" for local dev
+
 proc layout*(title: string, content: VNode): string =
+  let bp = basePath
   let page = buildHtml(html(lang="en")):
     head:
       meta(charset="utf-8")
@@ -11,15 +14,15 @@ proc layout*(title: string, content: VNode): string =
       link(rel="preconnect", href="https://fonts.googleapis.com")
       link(rel="preconnect", href="https://fonts.gstatic.com", crossorigin="")
       link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&display=swap")
-      link(rel="stylesheet", href="/static/tux.css")
-      link(rel="stylesheet", href="/static/style.css")
+      link(rel="stylesheet", href=bp & "/static/tux.css")
+      link(rel="stylesheet", href=bp & "/static/style.css")
     body:
       header:
-        a(href="/"): text "matchstick"
+        a(href=bp & "/"): text "matchstick"
         nav:
-          a(href="/"): text "home"
-          a(href="/docs"): text "docs"
-          a(href="/playground"): text "playground"
+          a(href=bp & "/"): text "home"
+          a(href=bp & "/docs"): text "docs"
+          a(href=bp & "/playground"): text "playground"
           a(href="https://github.com/elee1766/matchstick", target="_blank"): text "github"
           button(id="theme-toggle", `data-variant`="ghost"): text "theme"
       main:
