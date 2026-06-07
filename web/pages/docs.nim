@@ -44,6 +44,57 @@ fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
 fw:snat({ from = "172.16.0.0/12", oif = "eth0", masquerade = true })
 """
 
+const exLaundry = """local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local https = fw:service("https", {"tcp", "udp"}, 443)
+
+fw:policy(wan, self, "drop")
+
+fw:laundry({
+  rpfilter       = true,
+  tcp_strict     = true,
+  broadcast_drop = true,
+})
+
+fw:exception("invalid", "accept", https)
+fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })
+"""
+
+const exDhcpDocker = """local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local lan  = fw:zone("lan", "eth1")
+local dock = fw:zone("dock", "docker0")
+local dns  = fw:service("dns", {"tcp", "udp"}, 53)
+
+fw:policy(wan, self, "drop")
+fw:policy(self, wan, "accept")
+fw:policy(lan, self, "accept")
+fw:policy(dock, self, "reject")
+fw:policy(dock, wan, "accept")
+
+fw:dhcp(wan, "client")
+fw:dhcp(lan, "server")
+
+fw:docker({ bridges = {"docker0", "br-+"} })
+
+fw:rule(dock, self, "accept", dns)
+
+fw:snat({ from = "172.17.0.0/12", oif = "eth0", masquerade = true })
+"""
+
+const exMssRedirect = """local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")
+local lan  = fw:zone("lan", "eth1")
+
+fw:policy(wan, self, "drop")
+fw:policy(lan, self, "accept")
+fw:policy(lan, wan, "accept")
+
+fw:mss_clamp("forward")
+
+fw:redirect({ iface = lan, proto = "tcp", port = {80}, dest_port = 3128 })
+"""
+
 const exSysctl = """local self = fw:zone("fw")
 local wan  = fw:zone("wan", "eth0")
 local lan  = fw:zone("lan", "eth1")
@@ -57,11 +108,17 @@ fw:sysctl("net.ipv4.conf.all.log_martians", false)
 # These run at startup, before Mummy's thread pool starts
 var outZonesAndPolicies {.global.}: string
 var outNat {.global.}: string
+var outLaundry {.global.}: string
+var outDhcpDocker {.global.}: string
+var outMssRedirect {.global.}: string
 var outSysctl {.global.}: string
 
 proc initExamples*() =
   outZonesAndPolicies = renderExample(exZonesAndPolicies)
   outNat = renderExample(exNat)
+  outLaundry = renderExample(exLaundry)
+  outDhcpDocker = renderExample(exDhcpDocker)
+  outMssRedirect = renderExample(exMssRedirect)
   outSysctl = renderSysctls(exSysctl)
 
 proc docsPage*(): string =
@@ -252,46 +309,143 @@ fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })"""
             code: text outNat
 
       h2(id="ip-lists"): text "ip lists"
-      p: text "named sets of ip addresses for blocklists, allowlists, geoip, etc."
+      p:
+        text "ip lists create nftables sets that can be referenced in rules. "
+        text "they can be populated statically in the config, or dynamically at runtime "
+        text "by external tools like crowdsec, fail2ban, or custom scripts using "
+        code: text "nft add element"
+        text "."
       pre:
         code:
-          text """fw:iplist("blocklist", { type = "ipv4", flags = "timeout" })
+          text """-- dynamic set: populated externally (e.g. crowdsec, fail2ban)
+-- "timeout" flag means entries auto-expire
+fw:iplist("blocklist", { type = "ipv4", flags = "timeout" })
 
+-- static set with elements baked into the ruleset
+-- "interval" flag allows CIDR range matching
 fw:iplist("bogons", {
   type = "ipv4", flags = "interval",
   elements = { "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16" },
 })
 
-fw:iplist("threats", { type = "ipv4", flags = "timeout", url = "https://example.com/blocklist.txt" })"""
+-- set with URL (metadata for a future "matchstick refresh" command)
+fw:iplist("threats", { type = "ipv4", flags = "timeout",
+  url = "https://example.com/blocklist.txt" })
+
+-- use in rules with saddr_list or daddr_list
+fw:rule(wan, self, "drop", { saddr_list = "blocklist" })"""
 
       h2(id="packet-hygiene"): text "packet hygiene"
+      p:
+        text "matchstick automatically generates packet sanity checks. "
+        text "these run before your zone rules and catch malformed, spoofed, or invalid traffic. "
+        text "all are enabled by default."
+      ul:
+        li:
+          strong: text "rpfilter"
+          text " — reverse path filtering. drops packets whose source address has no return route via the incoming interface (anti-spoofing)."
+        li:
+          strong: text "tcp_strict"
+          text " — drops packets with invalid tcp flag combinations (null flags, fin+syn, syn+rst, xmas, new non-syn). prevents tcp-based scanning and OS fingerprinting."
+        li:
+          strong: text "broadcast_drop"
+          text " — drops broadcast and multicast packets in the forward chain. prevents smurf amplification attacks."
       pre:
         code:
           text """fw:laundry({
-  rpfilter       = true,   -- reverse path filtering (anti-spoofing)
+  rpfilter       = true,   -- reverse path filtering
   tcp_strict     = true,   -- drop malformed tcp flags
   broadcast_drop = true,   -- drop broadcast/multicast in forward
-})
-
--- exceptions for drop chains
-fw:exception("invalid", "accept", https)
-fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })"""
+})"""
+      p:
+        text "sometimes legitimate traffic gets caught by these checks. "
+        text "for example, ipvs load-balanced traffic may be marked invalid by conntrack. "
+        text "use fw:exception() to add accept rules before the drop:"
+      pre:
+        code:
+          text """fw:exception("invalid", "accept", https)
+fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })
+fw:exception("rpfilter", "accept", { proto = "udp", port = 68 })"""
+      p: text "here is what the generated packet hygiene chains look like:"
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exLaundry
+        section:
+          header: text "nftables output"
+          pre:
+            code: text outLaundry
 
       h2(id="mss-clamping"): text "mss clamping"
+      p:
+        text "mss clamping is needed when your network path has a reduced mtu — "
+        text "common with pppoe, vpn tunnels, and wireguard. without it, tcp connections "
+        text "may hang or stall because packets exceed the path mtu and get silently dropped."
+      p:
+        text "matchstick creates a separate chain at mangle priority that rewrites the tcp mss "
+        text "field in syn packets to match the route mtu (pmtud)."
       pre:
         code:
-          text """fw:mss_clamp("forward")  -- clamp tcp syn mss to path mtu"""
+          text """fw:mss_clamp("forward")    -- most common: clamp forwarded traffic
+fw:mss_clamp("output")     -- also clamp locally generated traffic
+fw:mss_clamp("postrouting") -- clamp at postrouting"""
 
       h2(id="dhcp"): text "dhcp"
+      p:
+        text "dhcp needs special handling because it uses broadcast udp on ports 67/68, "
+        text "which would normally be dropped by the firewall. fw:dhcp() adds rules to the "
+        text "input chain to allow dhcp traffic on the specified zone's interfaces."
+      ul:
+        li:
+          code: text "\"client\""
+          text " — this machine gets its ip via dhcp on this zone (allows udp 67→68 inbound)"
+        li:
+          code: text "\"server\""
+          text " — this machine serves dhcp on this zone (allows udp 68→67 inbound, and the corresponding outbound)"
       pre:
         code:
-          text """fw:dhcp(wan, "client")
-fw:dhcp(lan, "server")"""
+          text """fw:dhcp(wan, "client")   -- get ip from upstream
+fw:dhcp(lan, "server")  -- serve ip to lan clients"""
 
       h2(id="docker"): text "docker"
+      p:
+        text "docker creates its own bridge networks (docker0, br-*) and by default manages iptables rules "
+        text "that bypass your firewall entirely. this is a well-known security problem with ufw and other firewalls."
+      p:
+        text "matchstick handles docker by treating bridge interfaces as zones. "
+        text "you define the docker bridge as a zone and write explicit policies and rules for container traffic, "
+        text "just like any other zone. matchstick's forward chain controls all forwarded traffic, including docker."
       pre:
         code:
-          text """fw:docker({ bridges = {"docker0", "br-+"} })"""
+          text """-- declare docker bridges (br-+ matches all br-* bridges)
+fw:docker({ bridges = {"docker0", "br-+"} })
+
+-- then treat "dock" zone like any other
+fw:policy(dock, self, "reject")   -- containers can't reach firewall
+fw:policy(dock, wan, "accept")    -- containers can reach internet
+fw:rule(dock, self, "accept", dns)  -- except dns"""
+      p: text "full example with dhcp and docker:"
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exDhcpDocker
+        section:
+          header: text "nftables output"
+          pre:
+            code: text outDhcpDocker
+
+      p: text "mss clamping and redirect example:"
+      tdiv(class="example-pair"):
+        section:
+          header: text "firewall.lua"
+          pre:
+            code: text exMssRedirect
+        section:
+          header: text "nftables output"
+          pre:
+            code: text outMssRedirect
 
       h2(id="sysctl"): text "sysctl"
       p:
@@ -322,57 +476,131 @@ fw:sysctl("net.ipv4.conf.all.forwarding", false)"""
             code: text outSysctl
 
       h2(id="hooks"): text "hooks"
+      p:
+        text "lifecycle hooks run shell commands before or after applying the firewall. "
+        text "useful for running sysctl, restarting services, or sending notifications."
       pre:
         code:
           text """fw:hook({
-  pre_start  = "echo starting",
+  pre_start  = "echo starting firewall",
   post_start = "sysctl -p /etc/sysctl.d/custom.conf",
+  pre_stop   = "/usr/local/bin/notify-slack stopping",
+  post_stop  = "echo firewall stopped",
 })"""
+      p:
+        text "hooks run with the same privileges as matchstick (typically root). "
+        text "pre_start/post_start run during "
+        code: text "matchstick apply"
+        text ". pre_stop/post_stop are available for init system integration."
 
       h2(id="includes"): text "includes"
+      p:
+        text "split your config across multiple files. paths are resolved relative to the "
+        text "current config file's directory. circular includes are detected."
       pre:
         code:
-          text """fw:include("services.lua")
-fw:include("rules.lua")"""
+          text """-- main firewall.lua
+fw:include("services.lua")    -- service definitions
+fw:include("zones.lua")       -- zone + host definitions
+fw:include("policies.lua")    -- zone pair policies
+fw:include("rules/wan.lua")   -- subdirectory works too
+fw:include("rules/lan.lua")"""
 
       h2(id="rate-limiting"): text "rate limiting"
+      p:
+        text "rate limiting restricts the number of new connections per time period. "
+        text "useful for preventing brute force attacks (ssh), dos, or api abuse. "
+        text "matchstick uses nftables dynamic sets to track per-source-ip rates."
       pre:
         code:
-          text """local rate = util:rate("5/minute", { burst = 10 })
-local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })
+          text """-- anonymous rate limit (per-rule)
+fw:rule(wan, self, "accept", {
+  service = ssh,
+  rate = util:rate("5/minute", { burst = 10 }),
+})
 
-fw:rule(wan, self, "accept", { service = ssh, rate = rate })"""
+-- named rate limit (shared across rules)
+local ssh_limit = util:rate("3/minute", { burst = 5, name = "ssh_limit" })
+fw:rule(wan, self, "accept", { service = ssh, rate = ssh_limit })"""
+      p:
+        text "the rate format is \"count/unit\" where unit is second, minute, hour, or day. "
+        text "burst allows a short spike before the limit kicks in."
 
       h2(id="custom-chains"): text "custom chains"
-      p: text "create chains at arbitrary nftables hook points and priorities. rules are nftables json objects."
+      p:
+        text "for advanced use cases (policy routing, packet marking, traffic shaping), "
+        text "you can create nftables chains at arbitrary hook points and priorities. "
+        text "rules are nftables json objects (lua tables that map to the nftables json schema), "
+        text "ensuring both text and json output work correctly."
       pre:
         code:
-          text """fw:chain("prerouting", {
-  type = "filter", priority = "mangle",
-  rules = { {
-    { match = { op = "==", left = { meta = { key = "iifname" } }, right = "eth1" } },
-    { mangle = { key = { meta = { key = "mark" } }, value = 256 } },
-  } },
+          text """-- mark traffic from eth1 for policy routing
+fw:chain("prerouting", {
+  type = "filter",
+  priority = "mangle",  -- or "raw", "filter", "security", or a number
+  rules = {
+    {  -- each rule is an array of statement objects
+      { match = { op = "==",
+        left = { meta = { key = "iifname" } },
+        right = "eth1" } },
+      { mangle = { key = { meta = { key = "mark" } }, value = 256 } },
+    },
+  },
 })"""
+      p:
+        text "named priorities: raw (-300), mangle (-150), filter (0), security (50), "
+        text "srcnat (100), dstnat (-100). all offset by your priority_offset (default 5). "
+        text "hooks: prerouting, postrouting, forward, input, output."
 
       h2(id="raw-nftables"): text "raw nftables"
-      p: text "escape hatch: inject nftables json command objects directly."
+      p:
+        text "escape hatch for anything matchstick doesn't have a first-class api for. "
+        text "inject raw nftables json command objects directly into the ruleset. "
+        text "each argument is a lua table that maps to a single nftables json command."
       pre:
         code:
-          text """fw:raw_nft({ add = { chain = {
-  family = "inet", table = "matchstick", name = "my_chain",
-  type = "filter", hook = "input", prio = 200, policy = "accept",
-} } })"""
+          text """-- create a custom chain
+fw:raw_nft(
+  { add = { chain = {
+    family = "inet", table = "matchstick", name = "my_chain",
+    type = "filter", hook = "input", prio = 200, policy = "accept",
+  }}},
+  { add = { rule = {
+    family = "inet", table = "matchstick", chain = "my_chain",
+    expr = {
+      { match = { op = "==",
+        left = { payload = { protocol = "tcp", field = "dport" } },
+        right = 12345 } },
+      { accept = {} },
+    },
+  }}}
+)"""
+      p:
+        text "raw commands are passed through verbatim to json output and rendered to "
+        text "text via a json-to-nftables converter. they appear inside the matchstick table."
 
       h2(id="global-config"): text "global config"
+      p: text "override defaults for the entire firewall:"
       pre:
         code:
           text """fw:config({
-  table_name = "matchstick", priority_offset = 5,
-  family = "inet", input_policy = "drop", output_policy = "accept",
-  log_rate = "5/minute burst 5", log_prefix = "matchstick",
-  counter = false,
+  table_name      = "matchstick",      -- nftables table name
+  priority_offset = 5,                 -- chain priority offset
+  family          = "inet",            -- "inet" (dual-stack) or "ip" (v4 only)
+  input_policy    = "drop",            -- base input chain policy
+  output_policy   = "accept",          -- base output chain policy
+  log_rate        = "5/minute burst 5", -- rate limit for logging
+  log_prefix      = "matchstick",       -- syslog prefix
+  log_level       = "info",             -- log level
+  counter         = false,              -- add counters to all rules
+  log_set_size    = 65535,              -- max entries in rate limit sets
+  log_set_timeout = 60,                -- rate limit entry timeout (seconds)
 })"""
+      p:
+        text "the priority_offset shifts all matchstick chains relative to the standard "
+        text "nftables priorities. default 5 means matchstick's filter chains run at "
+        text "priority filter+5, which avoids conflicts with other nftables rulesets. "
+        text "set to 0 to use standard priorities, or higher to run after other tools."
 
       h2(id="cli"): text "cli"
       table:
