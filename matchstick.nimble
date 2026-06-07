@@ -2,7 +2,7 @@
 version       = "0.1.0"
 author        = "elee1766"
 description   = "Lua-based nftables firewall configuration tool"
-license       = "MIT"
+license       = "AGPL-3.0"
 srcDir        = "src"
 bin           = @["matchstick"]
 
