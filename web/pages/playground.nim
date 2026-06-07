@@ -23,27 +23,29 @@ fw:rule(wan, self, "accept", ping)
 
 proc playgroundPage*(): string =
   let content = buildHtml(tdiv):
-    h1: text "Playground"
-    p: text "Edit the Lua config and see the generated nftables output."
+    h1: text "playground"
+    p: text "edit the lua config and see the generated nftables output."
 
-    tdiv(class="playground"):
-      tdiv(class="playground-editor"):
-        h3: text "firewall.lua"
-        textarea(id="config-input", rows="20", spellcheck="false", autocomplete="off", autocorrect="off", autocapitalize="off"):
+    tdiv(class="pg-grid"):
+      section:
+        header:
+          text "firewall.lua"
+        textarea(id="config-input", rows="24", spellcheck="false",
+                 autocomplete="off", autocorrect="off", autocapitalize="off"):
           text defaultConfig
-        tdiv(class="controls"):
-          button(id="btn-render", class="btn"): text "Render"
-          button(id="btn-check", class="btn btn-outline"): text "Check"
+        tdiv(class="pg-controls"):
+          button(id="btn-render"): text "render"
+          button(id="btn-check", `data-variant`="soft"): text "check"
           select(id="output-format"):
             option(value="text", selected="selected"): text "nftables text"
-            option(value="json"): text "nftables JSON"
+            option(value="json"): text "nftables json"
             option(value="sysctl"): text "sysctl"
 
-      tdiv(class="playground-output"):
-        h3: text "Output"
-        pre(id="output"):
+      section:
+        header: text "output"
+        pre(id="output", class="pg-output"):
           code(id="output-code"):
-            text "Click Render to see output..."
+            text "click render to see output..."
 
     verbatim """
 <script>
@@ -51,45 +53,36 @@ document.getElementById('btn-render').addEventListener('click', async () => {
   const config = document.getElementById('config-input').value;
   const format = document.getElementById('output-format').value;
   const out = document.getElementById('output-code');
-  out.textContent = 'Rendering...';
+  out.textContent = 'rendering...';
   try {
     const resp = await fetch('/api/render', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config: config, format: format}),
+      body: JSON.stringify({config, format}),
     });
     const data = await resp.json();
-    if (data.error) {
-      out.textContent = 'Error:\n' + data.error;
-    } else {
-      out.textContent = data.output;
-    }
+    out.textContent = data.error ? 'error:\n' + data.error : data.output;
   } catch (e) {
-    out.textContent = 'Request failed: ' + e.message;
+    out.textContent = 'request failed: ' + e.message;
   }
 });
-
 document.getElementById('btn-check').addEventListener('click', async () => {
   const config = document.getElementById('config-input').value;
   const out = document.getElementById('output-code');
-  out.textContent = 'Checking...';
+  out.textContent = 'checking...';
   try {
     const resp = await fetch('/api/check', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config: config}),
+      body: JSON.stringify({config}),
     });
     const data = await resp.json();
-    if (data.error) {
-      out.textContent = 'Error:\n' + data.error;
-    } else {
-      out.textContent = data.output;
-    }
+    out.textContent = data.error ? 'error:\n' + data.error : data.output;
   } catch (e) {
-    out.textContent = 'Request failed: ' + e.message;
+    out.textContent = 'request failed: ' + e.message;
   }
 });
 </script>
 """
 
-  layout("Playground", content)
+  layout("playground", content)

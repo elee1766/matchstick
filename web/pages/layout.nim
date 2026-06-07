@@ -1,4 +1,4 @@
-## Base HTML layout for all pages.
+## Base HTML layout — uses tux.css semantic elements.
 
 import karax/[karaxdsl, vdom]
 
@@ -7,25 +7,50 @@ proc layout*(title: string, content: VNode): string =
     head:
       meta(charset="utf-8")
       meta(name="viewport", content="width=device-width, initial-scale=1")
-      title: text title & " - matchstick"
+      title: text title & " — matchstick"
       link(rel="preconnect", href="https://fonts.googleapis.com")
       link(rel="preconnect", href="https://fonts.gstatic.com", crossorigin="")
       link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&display=swap")
       link(rel="stylesheet", href="/static/tux.css")
       link(rel="stylesheet", href="/static/style.css")
     body:
-      nav(class="nav"):
-        tdiv(class="nav-inner"):
-          a(href="/", class="logo"): text "matchstick"
-          tdiv(class="nav-links"):
-            a(href="/"): text "Home"
-            a(href="/docs"): text "Docs"
-            a(href="/playground"): text "Playground"
-            a(href="https://github.com/elee1766/matchstick", target="_blank"): text "GitHub"
-      main(class="container"):
+      header:
+        a(href="/"): text "matchstick"
+        nav:
+          a(href="/"): text "home"
+          a(href="/docs"): text "docs"
+          a(href="/playground"): text "playground"
+          a(href="https://github.com/elee1766/matchstick", target="_blank"): text "github"
+          button(id="theme-toggle", `data-variant`="ghost"): text "theme"
+      main:
         content
-      footer(class="footer"):
-        tdiv(class="container"):
-          text "matchstick — Lua-based nftables firewall configuration tool"
+      footer:
+        p: text "matchstick — lua-based nftables firewall configuration"
+      verbatim """
+<script>
+function getTheme() { return localStorage.getItem('theme') || 'auto'; }
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+}
+function cycleTheme() {
+  var order = ['auto','light','dark'];
+  var cur = order.indexOf(getTheme());
+  var next = order[(cur+1) % 3];
+  localStorage.setItem('theme', next);
+  applyTheme(next);
+  document.getElementById('theme-toggle').textContent = next === 'auto' ? 'theme' : next;
+}
+(function() {
+  var t = getTheme();
+  applyTheme(t);
+  var el = document.getElementById('theme-toggle');
+  if (el) {
+    if (t !== 'auto') el.textContent = t;
+    el.addEventListener('click', cycleTheme);
+  }
+})();
+</script>
+"""
 
   result = "<!DOCTYPE html>\n" & $page

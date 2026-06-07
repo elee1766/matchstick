@@ -12,3 +12,7 @@ if muslGcc != "":
   switch("gcc.linkerexe", muslGcc)
   switch("passL", "-static")
 
+# begin Nimble config (version 2)
+when withDir(thisDir(), system.fileExists("nimble.paths")):
+  include "nimble.paths"
+# end Nimble config

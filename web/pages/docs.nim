@@ -5,79 +5,63 @@ import ./layout
 
 proc docsPage*(): string =
   let content = buildHtml(tdiv):
-    h1: text "Documentation"
+    h1: text "documentation"
 
-    # ----- Concepts -----
     section:
-      h2: text "How It Works"
+      header: text "how it works"
       p:
-        text "Matchstick compiles a Lua configuration file into nftables rules. "
-        text "You describe your network in terms of zones, hosts, services, policies, and rules. "
-        text "Matchstick builds the nftables chains, sets, and verdict maps automatically."
+        text "matchstick compiles a lua configuration file into nftables rules. "
+        text "describe your network in terms of zones, hosts, services, policies, and rules. "
+        text "matchstick builds the nftables chains, sets, and verdict maps automatically."
       pre:
         code:
-          text "firewall.lua  →  Lua VM  →  validate  →  nftables IR  →  text or JSON output"
+          text "firewall.lua  →  lua vm  →  validate  →  nftables ir  →  text or json"
       p:
-        text "At apply time, matchstick also derives and sets kernel sysctl parameters "
-        text "(IP forwarding, ARP hardening, etc.) based on your config."
+        text "at apply time, matchstick also derives and sets kernel sysctl parameters "
+        text "(ip forwarding, arp hardening, etc.) based on your config."
 
     section:
-      h2: text "Zones"
+      header: text "zones"
       p:
-        text "A zone is a group of network interfaces that share the same trust level. "
-        text "Every config needs exactly one zone with no interfaces — the firewall host itself."
+        text "a zone is a group of network interfaces that share the same trust level. "
+        text "every config needs exactly one zone with no interfaces — the firewall host itself."
       pre:
         code:
           text """local self = fw:zone("fw")              -- the firewall machine (no interface)
 local wan  = fw:zone("wan", "eth0")     -- internet-facing
-local lan  = fw:zone("lan", "eth1")     -- trusted LAN
+local lan  = fw:zone("lan", "eth1")     -- trusted lan
 local dmz  = fw:zone("dmz", "eth2")     -- servers
 
--- A zone can have multiple interfaces
+-- multiple interfaces
 local internal = fw:zone("internal", {"eth1", "eth2"})
 
--- Bridge zone (for Docker, LXC, etc.)
+-- bridge zone
 local dock = fw:zone("dock", "docker0", { bridge = true })"""
-      p:
-        text "Traffic between zones is controlled by policies and rules. "
-        text "Matchstick uses nftables verdict maps to dispatch packets from base chains "
-        text "to per-zone-pair chains, which is faster than linear rule matching."
 
     section:
-      h2: text "Hosts"
+      header: text "hosts"
       p:
-        text "A host is a specific IP address within a zone. "
-        text "Use hosts when you need per-machine rules instead of whole-zone rules."
+        text "a host is a specific ip address within a zone. "
+        text "use hosts when you need per-machine rules."
       pre:
         code:
           text """local server = fw:host("server", { zone = lan, addr = "10.0.0.10" })
 local admin  = fw:host("admin",  { zone = lan, addr = "10.0.0.50" })
 
--- Hosts can be used anywhere zones can be used
-fw:rule(admin, self, "accept", ssh)   -- only admin gets SSH
-fw:rule(server, dmz, "accept", http)  -- server can reach DMZ"""
+fw:rule(admin, self, "accept", ssh)   -- only admin gets ssh
+fw:rule(server, dmz, "accept", http)  -- server can reach dmz"""
 
     section:
-      h2: text "Services"
-      p:
-        text "A service is a named protocol + port combination. "
-        text "Define once, reuse everywhere."
+      header: text "services"
+      p: text "a named protocol + port combination. define once, reuse everywhere."
       pre:
         code:
-          text """-- Simple: one protocol, one port
-local ssh  = fw:service("ssh", "tcp", 22)
-local ntp  = fw:service("ntp", "udp", 123)
+          text """local ssh  = fw:service("ssh", "tcp", 22)
+local dns  = fw:service("dns", {"tcp", "udp"}, 53)       -- multi-protocol
+local mosh = fw:service("mosh", "udp", "60000-61000")    -- port range
+local ping = fw:service("ping", "icmp", "echo-request")  -- icmp type
 
--- Multiple protocols, same port (e.g. DNS)
-local dns  = fw:service("dns", {"tcp", "udp"}, 53)
-
--- Port range
-local mosh = fw:service("mosh", "udp", "60000-61000")
-
--- ICMP type
-local ping = fw:service("ping", "icmp", "echo-request")
-
--- Complex: multiple protocol/port pairs
+-- complex: multiple protocol/port pairs
 local plex = fw:service("plex", {
   {"tcp", 32400},
   {"udp", 1900},
@@ -85,271 +69,197 @@ local plex = fw:service("plex", {
 })"""
 
     section:
-      h2: text "Policies"
+      header: text "policies"
       p:
-        text "A policy sets the default action for traffic between two zones. "
-        text "Policies apply to all traffic that doesn't match a more specific rule."
+        text "the default action for traffic between two zones. "
+        text "applies to all traffic that doesn't match a more specific rule."
       pre:
         code:
           text """fw:policy(wan, self, "drop", { log = true })  -- drop incoming, log it
 fw:policy(self, wan, "accept")                -- allow outgoing
-fw:policy(lan, wan, "accept")                 -- LAN can reach internet
-fw:policy(lan, self, "accept")                -- LAN can reach firewall
-
--- Wildcard: default for any pair not explicitly listed
-fw:policy("*", "*", "reject")"""
+fw:policy(lan, wan, "accept")                 -- lan can reach internet
+fw:policy("*", "*", "reject")                 -- default for everything else"""
       p:
-        text "Actions: \"accept\", \"drop\", \"reject\". "
-        text "Reject sends an ICMP admin-prohibited response. "
-        text "Drop silently discards the packet."
+        text "actions: \"accept\", \"drop\", \"reject\". "
+        text "reject sends icmp admin-prohibited. drop silently discards."
 
     section:
-      h2: text "Rules"
-      p:
-        text "Rules allow or deny specific traffic between zones. "
-        text "They are evaluated before the zone-pair policy."
+      header: text "rules"
+      p: text "allow or deny specific traffic. evaluated before the zone-pair policy."
       pre:
         code:
-          text """-- Allow a service
-fw:rule(wan, self, "accept", ssh)
-
--- Allow by protocol and port (no named service needed)
+          text """fw:rule(wan, self, "accept", ssh)
 fw:rule(wan, self, "accept", { proto = "tcp", port = {80, 443} })
-
--- Port range
 fw:rule(wan, self, "accept", { proto = "udp", port = "10000-10100" })
 
--- Rate-limited rule
+-- rate-limited
 fw:rule(wan, self, "accept", {
   service = ssh,
   rate = util:rate("5/minute", { burst = 10 }),
 })
 
--- Connection limit (max concurrent connections)
+-- connection limit
 fw:rule(wan, self, "accept", { service = ssh, connlimit = 10 })
 
--- MAC address filter
+-- mac address filter
 fw:rule(lan, self, "accept", { service = ssh, mac = "aa:bb:cc:dd:ee:ff" })
 
--- Source IP list (for blocklists, GeoIP, etc.)
+-- ip list matching (source and destination)
 fw:rule(wan, self, "drop", { saddr_list = "blocklist" })
+fw:rule(lan, wan, "accept", { daddr_list = "allowed_hosts" })
 
--- Destination IP list
-fw:rule(lan, wan, "accept", { service = http, daddr_list = "allowed_hosts" })
-
--- Bare rule (match all traffic, no port/proto filter)
-fw:rule(guest, self, "drop")  -- block everything from guest"""
+-- bare rule (match all traffic)
+fw:rule(guest, self, "drop")"""
 
     section:
-      h2: text "NAT"
-      h3: text "DNAT (Port Forwarding)"
-      p: text "Forward incoming traffic from one zone to a host in another zone."
+      header: text "nat"
+      h3: text "dnat (port forwarding)"
       pre:
         code:
           text """fw:dnat({ iface = wan, service = http, dest = webserver })
-fw:rule(wan, webserver, "accept", http)  -- also need a forward rule
+fw:rule(wan, webserver, "accept", http)  -- need a forward rule too
 
--- With port remap
+-- port remap
 fw:dnat({ iface = wan, proto = "tcp", port = 2222, dest = server, dest_port = 22 })
 
--- Hairpin NAT (LAN accessing internal server via public IP)
+-- hairpin nat
 fw:dnat({ iface = lan, daddr = "203.0.113.1", proto = "tcp", port = {80, 443}, dest = webserver })"""
 
-      h3: text "SNAT / Masquerade"
-      p: text "Rewrite the source address of outgoing traffic."
+      h3: text "snat / masquerade"
       pre:
         code:
-          text """-- Masquerade (dynamic IP — most common for home/office)
-fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
-
--- Static SNAT (server with fixed IP)
+          text """fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
 fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })"""
 
-      h3: text "Redirect"
-      p: text "Redirect traffic to a local port (transparent proxy)."
+      h3: text "redirect"
       pre:
         code:
           text """fw:redirect({ iface = lan, proto = "tcp", port = {80}, dest_port = 3128 })"""
 
     section:
-      h2: text "IP Lists"
-      p:
-        text "Named sets of IP addresses. Used for blocklists, allowlists, GeoIP, etc. "
-        text "Sets are created in nftables and can be populated dynamically."
+      header: text "ip lists"
+      p: text "named sets of ip addresses for blocklists, allowlists, geoip, etc."
       pre:
         code:
-          text """-- Dynamic set (populated externally, e.g. by CrowdSec or fail2ban)
-fw:iplist("blocklist", { type = "ipv4", flags = "timeout" })
+          text """fw:iplist("blocklist", { type = "ipv4", flags = "timeout" })
 
--- Static set with elements
 fw:iplist("bogons", {
-  type = "ipv4",
-  flags = "interval",
+  type = "ipv4", flags = "interval",
   elements = { "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16" },
 })
 
--- Set with URL for auto-refresh (future: matchstick refresh)
-fw:iplist("threats", { type = "ipv4", flags = "timeout", url = "https://example.com/blocklist.txt" })
-
--- Use in rules
-fw:rule(wan, self, "drop", { saddr_list = "blocklist" })"""
+-- url for auto-refresh (future: matchstick refresh)
+fw:iplist("threats", { type = "ipv4", flags = "timeout", url = "https://example.com/blocklist.txt" })"""
 
     section:
-      h2: text "Packet Hygiene"
-      p:
-        text "Automatic packet sanity checks. All enabled by default."
+      header: text "packet hygiene"
       pre:
         code:
           text """fw:laundry({
   rpfilter       = true,   -- reverse path filtering (anti-spoofing)
-  tcp_strict     = true,   -- drop malformed TCP flag combinations
-  broadcast_drop = true,   -- drop broadcast/multicast in forward chain
-})"""
-      p:
-        text "Exceptions can be added to the drop chains:"
-      pre:
-        code:
-          text """-- Accept IPVS traffic that enters the invalid chain
-fw:exception("invalid", "accept", https)
+  tcp_strict     = true,   -- drop malformed tcp flags
+  broadcast_drop = true,   -- drop broadcast/multicast in forward
+})
 
--- Accept DHCP broadcasts past anti-smurf
+-- exceptions for drop chains
+fw:exception("invalid", "accept", https)
 fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })"""
 
     section:
-      h2: text "MSS Clamping"
-      p: text "Required for PPPoE, VPN tunnels, or any path with reduced MTU."
+      header: text "other features"
+      h3: text "mss clamping"
       pre:
         code:
-          text """fw:mss_clamp("forward")  -- clamp TCP SYN MSS to path MTU"""
+          text """fw:mss_clamp("forward")  -- clamp tcp syn mss to path mtu"""
 
-    section:
-      h2: text "DHCP"
+      h3: text "dhcp"
       pre:
         code:
-          text """fw:dhcp(wan, "client")   -- this machine gets IP via DHCP on wan
-fw:dhcp(lan, "server")  -- this machine serves DHCP on lan"""
+          text """fw:dhcp(wan, "client")
+fw:dhcp(lan, "server")"""
 
-    section:
-      h2: text "Docker"
+      h3: text "docker"
       pre:
         code:
           text """fw:docker({ bridges = {"docker0", "br-+"} })"""
 
-    section:
-      h2: text "Sysctl"
-      p:
-        text "Matchstick automatically derives kernel sysctl settings from your config. "
-        text "IP forwarding is enabled when forwarding rules exist. "
-        text "ARP hardening, redirect protection, and source routing protection are always set."
+      h3: text "sysctl"
       pre:
         code:
-          text """-- Add custom sysctls
-fw:sysctl("net.ipv4.tcp_syncookies", "1")
+          text """fw:sysctl("net.ipv4.tcp_syncookies", "1")
 
--- Batch form
-fw:sysctl({
-  ["net.netfilter.nf_conntrack_max"] = "262144",
-  ["net.core.somaxconn"] = "4096",
-})
+fw:sysctl({ ["net.netfilter.nf_conntrack_max"] = "262144" })
 
--- Unset a derived default (matchstick won't touch it)
+-- unset a derived default
 fw:sysctl("net.ipv4.conf.all.forwarding", false)"""
 
-    section:
-      h2: text "Hooks"
-      p: text "Run commands before/after applying or removing firewall rules."
+      h3: text "hooks"
       pre:
         code:
-          text """fw:hook({
-  pre_start  = "echo starting",
-  post_start = "sysctl -p /etc/sysctl.d/custom.conf",
-})"""
+          text """fw:hook({ post_start = "echo applied" })"""
 
-    section:
-      h2: text "Custom Chains"
-      p:
-        text "Create chains at arbitrary nftables hook points and priorities. "
-        text "Rules are nftables JSON objects (Lua tables)."
-      pre:
-        code:
-          text """fw:chain("prerouting", {
-  type = "filter",
-  priority = "mangle",
-  rules = {
-    {
-      { match = { op = "==", left = { meta = { key = "iifname" } }, right = "eth1" } },
-      { mangle = { key = { meta = { key = "mark" } }, value = 256 } },
-    },
-  },
-})"""
-
-    section:
-      h2: text "Raw nftables"
-      p: text "Escape hatch: inject nftables JSON command objects directly into the ruleset."
-      pre:
-        code:
-          text """fw:raw_nft({
-  add = { chain = {
-    family = "inet", table = "matchstick", name = "my_chain",
-    type = "filter", hook = "input", prio = 200, policy = "accept",
-  }}
-})"""
-
-    section:
-      h2: text "Global Config"
-      pre:
-        code:
-          text """fw:config({
-  table_name      = "matchstick",   -- nftables table name
-  priority_offset = 5,              -- chain priority offset
-  family          = "inet",         -- "inet" (dual-stack) or "ip" (v4 only)
-  input_policy    = "drop",         -- base input chain policy
-  output_policy   = "accept",       -- base output chain policy
-  log_rate        = "5/minute burst 5",
-  log_prefix      = "matchstick",
-  counter         = false,          -- add counters to all rules
-})"""
-
-    section:
-      h2: text "Includes"
-      p: text "Split config across multiple files."
+      h3: text "includes"
       pre:
         code:
           text """fw:include("services.lua")
-fw:include("zones.lua")
 fw:include("rules.lua")"""
 
-    section:
-      h2: text "Rate Limiting"
+      h3: text "rate limiting"
       pre:
         code:
           text """local rate = util:rate("5/minute", { burst = 10 })
-local named_rate = util:rate("3/second", { burst = 5, name = "ssh_limit" })
+local named = util:rate("3/second", { burst = 5, name = "ssh_limit" })"""
 
-fw:rule(wan, self, "accept", { service = ssh, rate = rate })"""
+      h3: text "custom chains"
+      pre:
+        code:
+          text """fw:chain("prerouting", {
+  type = "filter", priority = "mangle",
+  rules = { { { match = { op = "==",
+    left = { meta = { key = "iifname" } }, right = "eth1" } },
+    { mangle = { key = { meta = { key = "mark" } }, value = 256 } },
+  } },
+})"""
 
-    # ----- CLI (small reference) -----
+      h3: text "raw nftables"
+      pre:
+        code:
+          text """fw:raw_nft({ add = { chain = {
+  family = "inet", table = "matchstick", name = "my_chain",
+  type = "filter", hook = "input", prio = 200, policy = "accept",
+} } })"""
+
+      h3: text "global config"
+      pre:
+        code:
+          text """fw:config({
+  table_name = "matchstick", priority_offset = 5,
+  family = "inet", input_policy = "drop", output_policy = "accept",
+  log_rate = "5/minute burst 5", log_prefix = "matchstick",
+  counter = false,
+})"""
+
     section:
-      h2: text "CLI Reference"
-      table(class="doc-table"):
+      header: text "cli"
+      table:
         tbody:
           tr:
             td: code: text "matchstick check config.lua"
-            td: text "Validate"
+            td: text "validate"
           tr:
             td: code: text "matchstick render config.lua"
-            td: text "Print nftables (text or --json)"
+            td: text "print nftables (text or --json)"
           tr:
             td: code: text "matchstick apply config.lua"
-            td: text "Apply to kernel (--no-sysctl to skip)"
+            td: text "apply to kernel (--no-sysctl to skip)"
           tr:
             td: code: text "matchstick diff config.lua"
-            td: text "Diff running vs generated"
+            td: text "diff running vs generated"
           tr:
             td: code: text "matchstick show matrix|topology|sysctl|json"
-            td: text "Visualize config"
+            td: text "visualize config"
           tr:
             td: code: text "matchstick import-ufw"
-            td: text "Convert UFW rules (pipe from stdin)"
+            td: text "convert ufw rules (pipe from stdin)"
 
-  layout("Docs", content)
+  layout("docs", content)

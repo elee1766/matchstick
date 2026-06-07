@@ -245,6 +245,11 @@ nav a:is([aria-current="page"], .active) { color: var(--tux-text); }
   border: none;
 }
 
+/* nested cards: inset from parent, no double border */
+:is(section, article, aside) :is(section, article, aside) {
+  margin: 0.5rem;
+}
+
 /* -- tables -- */
 table { width: 100%; border-collapse: collapse; font-size: var(--tux-text-xs); }
 thead tr { background: var(--tux-bg-muted); }

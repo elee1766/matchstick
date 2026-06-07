@@ -5,41 +5,44 @@ import ./layout
 
 proc homePage*(): string =
   let content = buildHtml(tdiv):
-    section(class="hero"):
-      h1: text "matchstick"
-      p(class="subtitle"):
-        text "A Lua-based nftables firewall configuration tool."
+    section:
+      header: text "matchstick"
+      h1: text "lua-based nftables firewall"
       p:
-        text "Compile firewall configs from Lua to nftables. "
-        text "Zone-based, bidirectional, with automatic sysctl, Docker support, and more."
-      tdiv(class="cta"):
-        a(href="/playground", class="btn"): text "Try the Playground"
-        a(href="/docs", class="btn btn-outline"): text "Read the Docs"
+        text "compile firewall configs from lua to nftables. "
+        text "zone-based, bidirectional, with automatic sysctl, docker support, and more."
+      p:
+        a(href="/playground"): button: text "playground"
+        text " "
+        a(href="/docs"): button(`data-variant`="soft"): text "documentation"
+
+    tdiv(`data-grid`="3"):
+      section:
+        header: text "zones"
+        p: text "define zones, hosts, and policies. bidirectional rules between any pair of zones with verdict map dispatch."
+
+      section:
+        header: text "lua config"
+        p: text "full programming language. variables, loops, conditionals, includes. version-controllable config files."
+
+      section:
+        header: text "native nftables"
+        p: text "generates clean nftables rulesets. text and json output. no iptables compat shim."
+
+      section:
+        header: text "auto sysctl"
+        p: text "derives kernel settings from your config. ip forwarding, arp hardening, redirect protection."
+
+      section:
+        header: text "validation"
+        p: text "shadow rule detection, config validation, topology diagrams, zone policy matrix, diff against running rules."
+
+      section:
+        header: text "nat & docker"
+        p: text "dnat, snat, masquerade, hairpin nat, redirect. first-class docker bridge support."
 
     section:
-      h2: text "Features"
-      tdiv(class="grid"):
-        tdiv(class="card"):
-          h3: text "Zone-based firewalling"
-          p: text "Define zones, hosts, and policies. Bidirectional rules between any pair of zones."
-        tdiv(class="card"):
-          h3: text "Lua configuration"
-          p: text "Full programming language for your firewall config. Variables, loops, conditionals, includes."
-        tdiv(class="card"):
-          h3: text "Native nftables"
-          p: text "Generates clean nftables rulesets. Text and JSON output. No iptables compatibility shim."
-        tdiv(class="card"):
-          h3: text "Automatic sysctl"
-          p: text "Derives kernel settings from your config. IP forwarding, ARP hardening, redirect protection."
-        tdiv(class="card"):
-          h3: text "Validation & visualization"
-          p: text "Shadow rule detection, config validation, topology diagrams, zone policy matrix."
-        tdiv(class="card"):
-          h3: text "Docker & NAT"
-          p: text "First-class Docker bridge support. DNAT, SNAT, masquerade, hairpin NAT, redirect."
-
-    section:
-      h2: text "Quick Start"
+      header: text "quick start"
       pre:
         code:
           text """local ssh = fw:service("ssh", "tcp", 22)
@@ -53,11 +56,11 @@ fw:policy(self, wan, "accept")
 fw:rule(wan, self, "accept", ssh)"""
 
     section:
-      h2: text "Install"
+      header: text "install"
       pre:
         code:
           text """git clone https://github.com/elee1766/matchstick
 cd matchstick
 make install"""
 
-  layout("Home", content)
+  layout("home", content)

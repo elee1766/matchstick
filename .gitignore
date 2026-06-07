@@ -16,3 +16,6 @@ coverage/
 # OS
 .DS_Store
 ~
+nimble.develop
+nimble.paths
+nimbledeps
