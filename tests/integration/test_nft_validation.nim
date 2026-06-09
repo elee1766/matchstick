@@ -230,7 +230,7 @@ let configs = {
   "exceptions": cfgExceptions,
   "rate_limit": cfgRateLimit,
   "counter": cfgCounter,
-  # "ipv4_only": cfgIpv4Only,  # TODO: family="ip" still generates icmpv6/ip6 rules
+  "ipv4_only": cfgIpv4Only,
   "hairpin": cfgHairpin,
 }
 

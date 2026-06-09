@@ -251,6 +251,7 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   let addCounter = state.config.counter
   let inputPolicy = state.config.inputPolicy
   let outputPolicy = state.config.outputPolicy
+  let dualStack = fam == "inet"  # false for "ip" (IPv4 only)
 
   var fwZone: Zone
   var ifaceZones: seq[Zone]
@@ -277,7 +278,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
 
   # Log rate limiting sets
   cmds.add addSet(fam, tn, "_lograte_4", "ipv4_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
-  cmds.add addSet(fam, tn, "_lograte_6", "ipv6_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
+  if dualStack:
+    cmds.add addSet(fam, tn, "_lograte_6", "ipv6_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
 
   # Collect which zone-pair chains will exist
   var pairChainNames: seq[string]
@@ -322,27 +324,28 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     limitStmt(10, "second", burst = 5),
     acceptStmt()])
 
-  cmds.add addChain(fam, tn, "icmp_v6")
-  # NDP and essential ICMPv6 -- always accept (required for IPv6 operation)
-  cmds.add addRule(fam, tn, "icmp_v6", @[
-    matchStmt(opEq, payloadExpr("icmpv6", "type"),
-      anonSetExpr(@[strExpr("nd-neighbor-solicit"), strExpr("nd-neighbor-advert"),
-        strExpr("nd-router-solicit"), strExpr("nd-router-advert"),
-        strExpr("mld-listener-query"), strExpr("mld-listener-report")])),
-    acceptStmt()])
-  # Error types -- accept without rate limit (important for PMTUD etc.)
-  cmds.add addRule(fam, tn, "icmp_v6", @[
-    matchStmt(opEq, payloadExpr("icmpv6", "type"),
-      anonSetExpr(@[strExpr("destination-unreachable"), strExpr("packet-too-big"),
-        strExpr("time-exceeded"), strExpr("parameter-problem")])),
-    acceptStmt()])
-  # Rate-limit echo-request (ping6)
-  cmds.add addRule(fam, tn, "icmp_v6", @[
-    matchStmt(opEq, payloadExpr("icmpv6", "type"), strExpr("echo-request")),
-    limitStmt(10, "second", burst = 5),
-    acceptStmt()])
-  # Drop other ICMPv6
-  cmds.add addRule(fam, tn, "icmp_v6", @[dropStmt()])
+  if dualStack:
+    cmds.add addChain(fam, tn, "icmp_v6")
+    # NDP and essential ICMPv6 -- always accept (required for IPv6 operation)
+    cmds.add addRule(fam, tn, "icmp_v6", @[
+      matchStmt(opEq, payloadExpr("icmpv6", "type"),
+        anonSetExpr(@[strExpr("nd-neighbor-solicit"), strExpr("nd-neighbor-advert"),
+          strExpr("nd-router-solicit"), strExpr("nd-router-advert"),
+          strExpr("mld-listener-query"), strExpr("mld-listener-report")])),
+      acceptStmt()])
+    # Error types -- accept without rate limit (important for PMTUD etc.)
+    cmds.add addRule(fam, tn, "icmp_v6", @[
+      matchStmt(opEq, payloadExpr("icmpv6", "type"),
+        anonSetExpr(@[strExpr("destination-unreachable"), strExpr("packet-too-big"),
+          strExpr("time-exceeded"), strExpr("parameter-problem")])),
+      acceptStmt()])
+    # Rate-limit echo-request (ping6)
+    cmds.add addRule(fam, tn, "icmp_v6", @[
+      matchStmt(opEq, payloadExpr("icmpv6", "type"), strExpr("echo-request")),
+      limitStmt(10, "second", burst = 5),
+      acceptStmt()])
+    # Drop other ICMPv6
+    cmds.add addRule(fam, tn, "icmp_v6", @[dropStmt()])
 
   # rpfilter
   if state.laundry.rpfilter:
@@ -422,10 +425,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     cmds.add addRule(fam, tn, "input", @[jumpStmt("tcp_strict")])
 
   cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v4")])
-  cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v6")])
+  if dualStack:
+    cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v6")])
   cmds.add addRule(fam, tn, "input", @[vmapStmt(metaExpr("iifname"), setRef("input_zones"))])
   cmds.add logRateRule(fam, tn, "input", "_lograte_4", "ip", logPrefix & " input DROP ")
-  cmds.add logRateRule(fam, tn, "input", "_lograte_6", "ip6", logPrefix & " input DROP ")
+  if dualStack:
+    cmds.add logRateRule(fam, tn, "input", "_lograte_6", "ip6", logPrefix & " input DROP ")
   cmds.add addRule(fam, tn, "input", @[dropStmt()])
 
   # Forward chain
@@ -461,7 +466,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     let (polAction, polLog) = if pair.policy.isSome: (pair.policy.get.action, pair.policy.get.log)
                               else: (defaultAction, false)
 
-    let needsSplit = pair.builtRules.anyIt(it.ipv4Only) or pair.builtRules.anyIt(it.ipv6Only)
+    let needsSplit = dualStack and
+      (pair.builtRules.anyIt(it.ipv4Only) or pair.builtRules.anyIt(it.ipv6Only))
 
     if pair.builtRules.len == 0 and polAction == actAccept:
       cmds.add addChain(fam, tn, cn)
@@ -469,8 +475,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       continue
 
     if not needsSplit:
+      # No split needed — all rules go in one chain
+      # For family="ip", skip any ipv6Only rules
       cmds.add addChain(fam, tn, cn)
-      for br in pair.builtRules: cmds.add addRule(fam, tn, cn, br.stmts)
+      for br in pair.builtRules:
+        if not dualStack and br.ipv6Only: continue
+        cmds.add addRule(fam, tn, cn, br.stmts)
       if polLog:
         cmds.add logRateRule(fam, tn, cn, "_lograte_4", "ip", logPrefix & " " & cn & " " & $polAction & " ")
       cmds.add addRule(fam, tn, cn, @[actionToStmt(polAction)])
