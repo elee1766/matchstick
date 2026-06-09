@@ -105,5 +105,7 @@ p, h1, h2, h3, h4, pre, table, ul, ol, dl { text-align: left; }
 .pg-badge { font-size: var(--tux-text-micro, 10px); color: var(--tux-text-muted, #888); padding: 0.1rem 0.4rem; border: 1px solid var(--tux-border, #444); }
 .pg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
 @media (max-width: 768px) { .pg-grid { grid-template-columns: 1fr; } }
+.pg-grid section { min-width: 0; overflow: hidden; }
 .pg-grid textarea { width: 100%; min-height: 400px; white-space: pre; overflow-wrap: normal; overflow-x: auto; margin: 0; }
 .pg-output { max-height: 70vh; min-height: 400px; overflow: auto; margin: 0; }
+.pg-output code { white-space: pre; display: block; }
