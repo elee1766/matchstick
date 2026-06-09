@@ -25,9 +25,7 @@ proc playgroundPage*(): string =
   let bp = basePath
   let content = buildHtml(tdiv):
     tdiv(class="pg-toolbar"):
-      h2: text "playground"
       tdiv(class="pg-actions"):
-        button(id="btn-render"): text "render"
         select(id="output-format"):
           option(value="text", selected="selected"): text "nftables text"
           option(value="json"): text "nftables json"
@@ -43,7 +41,7 @@ proc playgroundPage*(): string =
 
       section:
         header:
-          span(id="check-status"): text "check"
+          span(id="check-status"): text "output"
         pre(id="output", class="pg-output"):
           code(id="output-code"):
             text ""
@@ -51,30 +49,26 @@ proc playgroundPage*(): string =
     verbatim("""
 <script>
 var engine = null;
-var checkTimer = null;
+var renderTimer = null;
 var lastConfig = '';
+var lastFormat = '';
 
-function callMatchstick(config, format) {
-  if (!engine) return JSON.stringify({error: 'wasm not loaded yet'});
-  return engine.ccall('loadAndRender', 'string', ['string','string'], [config, format]);
-}
-
-function doCheck() {
+function doRender() {
   var config = document.getElementById('config-input').value;
-  if (config === lastConfig) return;
+  var format = document.getElementById('output-format').value;
+  if (config === lastConfig && format === lastFormat) return;
   lastConfig = config;
+  lastFormat = format;
   var status = document.getElementById('check-status');
   var out = document.getElementById('output-code');
   if (!engine) { status.textContent = 'loading...'; return; }
-  status.textContent = 'checking...';
   try {
-    var data = JSON.parse(callMatchstick(config, 'check'));
+    var data = JSON.parse(engine.ccall('loadAndRender', 'string', ['string','string'], [config, format]));
     if (data.error) {
       status.textContent = 'error';
       out.textContent = data.error;
     } else {
-      var ok = data.output.indexOf('\nok') !== -1;
-      status.textContent = ok ? 'ok' : 'errors';
+      status.textContent = format;
       out.textContent = data.output;
     }
   } catch (e) {
@@ -84,40 +78,22 @@ function doCheck() {
 }
 
 document.getElementById('config-input').addEventListener('input', function() {
-  clearTimeout(checkTimer);
-  checkTimer = setTimeout(doCheck, 300);
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(doRender, 300);
 });
 
-document.getElementById('btn-render').addEventListener('click', function() {
-  var config = document.getElementById('config-input').value;
-  var format = document.getElementById('output-format').value;
-  var status = document.getElementById('check-status');
-  var out = document.getElementById('output-code');
-  if (!engine) { status.textContent = 'loading...'; return; }
-  status.textContent = 'rendering...';
-  try {
-    var data = JSON.parse(callMatchstick(config, format));
-    if (data.error) {
-      status.textContent = 'error';
-      out.textContent = data.error;
-    } else {
-      status.textContent = 'rendered';
-      out.textContent = data.output;
-    }
-  } catch (e) {
-    status.textContent = 'error';
-    out.textContent = e.message;
-  }
+document.getElementById('output-format').addEventListener('change', function() {
+  lastFormat = '';
+  doRender();
 });
 
-// Load WASM — playground.js defines createMatchstick via MODULARIZE
 var s = document.createElement('script');
 s.src = '""" & bp & """/static/playground.js';
 s.onload = function() {
   createMatchstick().then(function(mod) {
     engine = mod;
     document.getElementById('engine-badge').textContent = 'wasm';
-    doCheck();
+    doRender();
   }).catch(function(e) {
     document.getElementById('engine-badge').textContent = 'failed';
     document.getElementById('output-code').textContent = 'failed to load wasm: ' + e.message;
