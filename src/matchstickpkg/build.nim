@@ -279,17 +279,26 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   cmds.add addSet(fam, tn, "_lograte_4", "ipv4_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
   cmds.add addSet(fam, tn, "_lograte_6", "ipv6_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
 
-  # Verdict maps
+  # Collect which zone-pair chains will exist
+  var pairChainNames: seq[string]
+  for pair in zonePairs:
+    pairChainNames.add chainName(pair.src.name, pair.dst.name)
+
+  # Verdict maps — only add entries for pairs that have chains
   var inputElems: seq[NftMapElem]
   for z in ifaceZones:
-    for iface in z.interfaces:
-      inputElems.add NftMapElem(key: strExpr(iface), value: verdictExpr("jump", chainName(z.name, fwZone.name)))
+    let cn = chainName(z.name, fwZone.name)
+    if cn in pairChainNames:
+      for iface in z.interfaces:
+        inputElems.add NftMapElem(key: strExpr(iface), value: verdictExpr("jump", cn))
   cmds.add addMap(fam, tn, "input_zones", "ifname", "verdict", elem = inputElems)
 
   var outputElems: seq[NftMapElem]
   for z in ifaceZones:
-    for iface in z.interfaces:
-      outputElems.add NftMapElem(key: strExpr(iface), value: verdictExpr("jump", chainName(fwZone.name, z.name)))
+    let cn = chainName(fwZone.name, z.name)
+    if cn in pairChainNames:
+      for iface in z.interfaces:
+        outputElems.add NftMapElem(key: strExpr(iface), value: verdictExpr("jump", cn))
   cmds.add addMap(fam, tn, "output_zones", "ifname", "verdict", elem = outputElems)
 
   var fwdElems: seq[NftMapElem]
