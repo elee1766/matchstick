@@ -2,11 +2,9 @@
 
 [![CI](https://github.com/elee1766/matchstick/actions/workflows/ci.yml/badge.svg)](https://github.com/elee1766/matchstick/actions/workflows/ci.yml)
 
-shorewall-like firewall config tool that uses lua.
+Lua-based nftables firewall configuration tool. Compiles declarative firewall configs into native nftables rulesets with automatic sysctl management, input validation, and shadow rule detection.
 
-meant to hopefully replace shorewall for me.
-
-this is relatively untested, but i think it's pretty cool
+**[Documentation](https://elee1766.github.io/matchstick/docs/)** | **[Website](https://elee1766.github.io/matchstick/)**
 
 ## Example
 

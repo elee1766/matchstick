@@ -5,6 +5,7 @@ import mummy, mummy/routers
 
 import ./pages/home
 import ./pages/docs
+import ./pages/playground
 
 # ---------------------------------------------------------------------------
 # Static pages (pre-rendered at startup)
@@ -22,13 +23,17 @@ docsmod.initExamples()
 
 var cachedHome {.global.} = ""
 var cachedDocs {.global.} = ""
+var cachedPlayground {.global.} = ""
 cachedHome = homePage()
 cachedDocs = docsPage()
+cachedPlayground = playgroundPage()
 
 proc serveCachedHome(request: Request) =
   {.cast(gcsafe).}: serveStatic(request, cachedHome)
 proc serveCachedDocs(request: Request) =
   {.cast(gcsafe).}: serveStatic(request, cachedDocs)
+proc serveCachedPlayground(request: Request) =
+  {.cast(gcsafe).}: serveStatic(request, cachedPlayground)
 
 proc staticFile(request: Request) =
   let relPath = request.uri.replace("/static/", "")
@@ -62,9 +67,11 @@ var router: Router
 router.addRoute("GET", "/", serveCachedHome)
 router.addRoute("GET", "/docs", serveCachedDocs)
 router.addRoute("GET", "/docs/", serveCachedDocs)
+router.addRoute("GET", "/playground", serveCachedPlayground)
+router.addRoute("GET", "/playground/", serveCachedPlayground)
 router.addRoute("GET", "/static/*", staticFile)
 
-let port = parseInt(getEnv("PORT", "8080"))
+let port = parseInt(getEnv("PORT", "8888"))
 echo "matchstick web server listening on http://localhost:" & $port
 let server = newServer(router.toHandler())
 server.serve(Port(port))

@@ -4,6 +4,8 @@
 /matchstick_web
 /dist/
 /web/ssg
+/web/static/playground.js
+/web/static/playground.wasm
 nimcache/
 nimblecache/
 

@@ -35,6 +35,19 @@ jobs:
       - name: Install dependencies
         run: nimble install -y --depsOnly
 
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Build WASM playground
+        run: |
+          nim c --cpu:wasm32 -d:emscripten -d:noSystem -d:release \
+            --cc:clang --clang.exe:emcc --clang.linkerexe:emcc \
+            --passC:"-s WASM=1" \
+            --passL:"-s EXPORTED_FUNCTIONS=[_loadAndRender] -s EXPORTED_RUNTIME_METHODS=[ccall,cwrap] -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_NAME=createMatchstick" \
+            -o:web/static/playground.js web/wasm/playground.nim
+
       - name: Build static site
         run: nim c -d:release -d:ssg -r web/ssg.nim
 
