@@ -237,6 +237,22 @@ suite "Lua sandbox":
     check exitCode == 1
     check "os" in output
 
+  test "dofile is not available to configs":
+    let (output, exitCode) = checkLua("""
+      dofile("/tmp/unsafe.lua")
+      local self = fw:zone("fw")
+    """)
+    check exitCode == 1
+    check "dofile" in output
+
+  test "loadfile is not available to configs":
+    let (output, exitCode) = checkLua("""
+      loadfile("/tmp/unsafe.lua")
+      local self = fw:zone("fw")
+    """)
+    check exitCode == 1
+    check "loadfile" in output
+
 suite "Redirect validation":
   test "missing iface rejected":
     let (output, exitCode) = checkLua("""

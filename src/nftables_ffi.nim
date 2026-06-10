@@ -12,11 +12,9 @@ type
     error*: string
 
 proc findNft(): string =
-  let path = findExe("nft")
-  if path != "": return path
   for p in ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]:
     if fileExists(p): return p
-  return ""
+  return findExe("nft")
 
 proc ensureNft(): string =
   let nft = findNft()

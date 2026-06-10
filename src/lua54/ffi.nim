@@ -99,7 +99,12 @@ const
 # State management
 # ---------------------------------------------------------------------------
 
+type
+  LuaAlloc* = proc(ud: pointer, p: pointer, osize: csize_t, nsize: csize_t): pointer {.cdecl.}
+    ## Custom allocator function type for lua_newstate.
+
 proc luaL_newstate*(): LuaState {.importc, cdecl.}
+proc lua_newstate*(f: LuaAlloc, ud: pointer): LuaState {.importc, cdecl.}
 proc lua_close*(L: LuaState) {.importc, cdecl.}
 proc luaL_openlibs*(L: LuaState) {.importc, cdecl.}
 
@@ -116,17 +121,86 @@ proc luaopen_package*(L: LuaState): cint {.importc, cdecl.}
 proc luaopen_debug*(L: LuaState): cint {.importc, cdecl.}
 
 proc luaL_requiref*(L: LuaState, modname: cstring, openf: LuaCFunction, glb: cint) {.importc, cdecl.}
+proc lua_pushnil*(L: LuaState) {.importc, cdecl.}
+proc lua_setglobal*(L: LuaState, name: cstring) {.importc, cdecl.}
 
 proc lua_settop_fwd(L: LuaState, idx: cint) {.importc: "lua_settop", cdecl.}
+proc lua_getfield_fwd(L: LuaState, idx: cint, k: cstring): cint {.importc: "lua_getfield", cdecl.}
+proc lua_setfield_fwd(L: LuaState, idx: cint, k: cstring) {.importc: "lua_setfield", cdecl.}
+proc lua_pop_fwd(L: LuaState, n: cint) = lua_settop_fwd(L, -n - 1)
 
 proc luaL_openlibs_safe*(L: LuaState) =
-  ## Load only safe Lua libraries (no os, io, package, debug).
+  ## Load only safe Lua libraries (no os, io, package, debug, filesystem loaders).
+  ## Also removes dangerous base functions that could aid sandbox escape or DoS.
   luaL_requiref(L, "base", luaopen_base, 1); lua_settop_fwd(L, -2)
+
+  # Remove dangerous base library functions:
+  # - dofile/loadfile: filesystem access
+  # - load: arbitrary code compilation and bytecode injection (CVE-2021-44964 class)
+  # - collectgarbage: GC manipulation can aid exploitation
+  # - rawget/rawset: bypass metatable protections
+  # - rawequal/rawlen: bypass metatable protections
+  # - getmetatable/setmetatable: modify object behavior, sandbox weakening
+  for name in ["dofile", "loadfile", "load", "collectgarbage",
+               "rawget", "rawset", "rawequal", "rawlen",
+               "getmetatable", "setmetatable"]:
+    lua_pushnil(L)
+    lua_setglobal(L, name.cstring)
+
   luaL_requiref(L, "string", luaopen_string, 1); lua_settop_fwd(L, -2)
+
+  # Remove string.dump (bytecode dumping) and string.rep (single-call memory exhaustion)
+  discard lua_getfield_fwd(L, LUA_REGISTRYINDEX, "_LOADED")
+  discard lua_getfield_fwd(L, -1, "string")
+  lua_pushnil(L)
+  lua_setfield_fwd(L, -2, "dump")
+  lua_pushnil(L)
+  lua_setfield_fwd(L, -2, "rep")
+  lua_pop_fwd(L, 2)
+
   luaL_requiref(L, "table", luaopen_table, 1); lua_settop_fwd(L, -2)
   luaL_requiref(L, "math", luaopen_math, 1); lua_settop_fwd(L, -2)
   luaL_requiref(L, "utf8", luaopen_utf8, 1); lua_settop_fwd(L, -2)
   luaL_requiref(L, "coroutine", luaopen_coroutine, 1); lua_settop_fwd(L, -2)
+
+# ---------------------------------------------------------------------------
+# Memory-limited Lua state
+# ---------------------------------------------------------------------------
+
+const defaultLuaMemoryLimit* = 256 * 1024 * 1024  ## 256 MB default limit
+
+type
+  LuaAllocState* = object
+    allocated*: int
+    limit*: int
+
+proc luaLimitedAlloc(ud: pointer, p: pointer, osize: csize_t, nsize: csize_t): pointer {.cdecl.} =
+  ## Custom Lua allocator that enforces a memory ceiling.
+  ## Prevents DoS via string.rep, table construction, etc.
+  let state = cast[ptr LuaAllocState](ud)
+  if nsize == 0:
+    # Free
+    if p != nil:
+      state.allocated -= int(osize)
+      dealloc(p)
+    return nil
+  else:
+    # Alloc or realloc
+    let delta = int(nsize) - int(osize)
+    if state.allocated + delta > state.limit:
+      return nil  # refuse allocation, Lua will raise LUA_ERRMEM
+    state.allocated += delta
+    if p == nil:
+      return alloc(nsize)
+    else:
+      return realloc(p, nsize)
+
+proc luaL_newstate_limited*(allocState: ptr LuaAllocState, memLimit: int = defaultLuaMemoryLimit): LuaState =
+  ## Create a new Lua state with a memory limit.
+  ## The caller must keep `allocState` alive for the lifetime of the Lua state.
+  allocState.allocated = 0
+  allocState.limit = memLimit
+  result = lua_newstate(luaLimitedAlloc, cast[pointer](allocState))
 
 # ---------------------------------------------------------------------------
 # Loading and executing
@@ -171,7 +245,6 @@ proc lua_insert*(L: LuaState, idx: cint) =
 # Push values onto the stack
 # ---------------------------------------------------------------------------
 
-proc lua_pushnil*(L: LuaState) {.importc, cdecl.}
 proc lua_pushnumber*(L: LuaState, n: cdouble) {.importc, cdecl.}
 proc lua_pushinteger*(L: LuaState, n: clonglong) {.importc, cdecl.}
 proc lua_pushlstring*(L: LuaState, s: cstring, len: csize_t): cstring {.importc, cdecl.}
@@ -261,7 +334,6 @@ proc lua_newuserdata*(L: LuaState, sz: csize_t): pointer =
 # ---------------------------------------------------------------------------
 
 proc lua_getglobal*(L: LuaState, name: cstring): cint {.importc, cdecl.}
-proc lua_setglobal*(L: LuaState, name: cstring) {.importc, cdecl.}
 
 # ---------------------------------------------------------------------------
 # Auxiliary library (luaL_*)

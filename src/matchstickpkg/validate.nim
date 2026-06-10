@@ -9,6 +9,7 @@
 
 import std/[options, tables, strutils]
 import ./types
+import ./ipaddr
 
 const
   nftNameChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}
@@ -273,6 +274,75 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
         line: dnat.line)
 
   # ------------------------------------------------------------------
+  # Check: IPv6 address validation in IP lists and host addresses
+  # ------------------------------------------------------------------
+  for name, ipl in state.ipLists:
+    if ipl.ipType == "ipv6":
+      for elem in ipl.elements:
+        if not validateIpv6(elem):
+          msgs.addError("iplist \"" & name & "\": invalid IPv6 address/CIDR \"" & elem & "\"", ipl.line)
+
+  for name, host in state.hosts:
+    if host.addr4 != "" and isIpv6(host.addr4):
+      if not validateIpv6(host.addr4):
+        msgs.addError("host \"" & name & "\": invalid IPv6 address \"" & host.addr4 & "\"", host.line)
+
+  # Validate IPv6 in DNAT/SNAT/rule addresses
+  for dnat in state.dnatRules:
+    if dnat.daddr != "" and isIpv6(dnat.daddr):
+      if not validateIpv6(dnat.daddr):
+        msgs.addError("fw:dnat: invalid IPv6 daddr \"" & dnat.daddr & "\"", dnat.line)
+    if dnat.dest != "" and isIpv6(dnat.dest):
+      if not validateIpv6(dnat.dest):
+        msgs.addError("fw:dnat: invalid IPv6 dest \"" & dnat.dest & "\"", dnat.line)
+
+  for snat in state.snatRules:
+    if snat.fromNet != "" and isIpv6(snat.fromNet):
+      if not validateIpv6(snat.fromNet):
+        msgs.addError("fw:snat: invalid IPv6 from \"" & snat.fromNet & "\"", snat.line)
+
+  for rule in state.rules:
+    if rule.daddrRaw != "" and isIpv6(rule.daddrRaw):
+      if not validateIpv6(rule.daddrRaw):
+        msgs.addError("rule: invalid IPv6 daddr \"" & rule.daddrRaw & "\"", rule.line)
+
+  # ------------------------------------------------------------------
+  # Check: warn on match-all CIDRs (0.0.0.0/0, ::/0)
+  # ------------------------------------------------------------------
+  for rule in state.rules:
+    if rule.daddrRaw != "":
+      if rule.daddrRaw == "0.0.0.0/0" or rule.daddrRaw == "::/0":
+        msgs.add ValidationMsg(severity: svWarning,
+          msg: "rule uses match-all CIDR \"" & rule.daddrRaw &
+               "\" as daddr — this matches ALL traffic",
+          line: rule.line)
+
+  for name, ipl in state.ipLists:
+    for elem in ipl.elements:
+      if elem == "0.0.0.0/0" or elem == "::/0":
+        msgs.add ValidationMsg(severity: svWarning,
+          msg: "iplist \"" & name & "\" contains match-all CIDR \"" & elem &
+               "\" — this matches ALL traffic",
+          line: ipl.line)
+
+  for snat in state.snatRules:
+    if snat.fromNet == "0.0.0.0/0" or snat.fromNet == "::/0":
+      msgs.add ValidationMsg(severity: svWarning,
+        msg: "fw:snat uses match-all CIDR \"" & snat.fromNet &
+             "\" as source — this matches ALL traffic",
+        line: snat.line)
+
+  # ------------------------------------------------------------------
+  # Check: DNAT rules without daddr restriction (broadly matching)
+  # ------------------------------------------------------------------
+  for dnat in state.dnatRules:
+    if dnat.daddr == "":
+      msgs.add ValidationMsg(severity: svWarning,
+        msg: "fw:dnat to " & dnat.dest & " has no 'daddr' restriction — " &
+             "will match traffic to ANY destination address on the interface",
+        line: dnat.line)
+
+  # ------------------------------------------------------------------
   # Check: zone and interface name validity (Linux naming rules)
   # ------------------------------------------------------------------
   # Linux interface names: max 15 chars, alphanumeric + hyphen + underscore + dot
@@ -315,6 +385,56 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
     elif earlier.host.isSome and later.host.isSome:
       return earlier.host.get.name == later.host.get.name
     return false
+
+  proc portRangesOverlap(a, b: string): bool =
+    ## Check if two port/range strings overlap.
+    ## Handles single ports ("80") and ranges ("80-443").
+    if a == "" or b == "": return false
+    try:
+      let aParts = a.split('-')
+      let bParts = b.split('-')
+      let aLo = parseInt(aParts[0])
+      let aHi = if aParts.len == 2: parseInt(aParts[1]) else: aLo
+      let bLo = parseInt(bParts[0])
+      let bHi = if bParts.len == 2: parseInt(bParts[1]) else: bLo
+      return aLo <= bHi and bLo <= aHi
+    except ValueError:
+      return false
+
+  proc serviceOverlaps(earlier, later: Rule): bool =
+    ## Check if earlier rule's service/port specification overlaps with later's.
+    # If earlier has no service/proto filter, it matches everything
+    if earlier.service.isNone and earlier.proto.len == 0 and earlier.saddrList == "":
+      return true
+
+    # Same named service
+    if earlier.service.isSome and later.service.isSome:
+      if earlier.service.get.name == later.service.get.name:
+        return true
+
+    # Exact proto/port match
+    if earlier.proto == later.proto and earlier.port == later.port:
+      if earlier.proto.len > 0:
+        return true
+
+    # Port range overlap detection: check if any proto matches and ports overlap
+    if earlier.proto.len > 0 and later.proto.len > 0:
+      for ep in earlier.proto:
+        if ep in later.proto:
+          # Protocols overlap; check port ranges
+          if earlier.port.len == 0 and later.port.len == 0:
+            return true  # both match all ports for this proto
+          if earlier.port.len == 0:
+            return true  # earlier matches all ports
+          for ePort in earlier.port:
+            if later.port.len == 0:
+              return true  # later matches all ports, earlier is specific
+            for lPort in later.port:
+              if portRangesOverlap(ePort, lPort):
+                return true
+
+    return false
+
   # Group rules by zone pair (src zone name, dst zone name)
   type ZPKey = tuple[src, dst: string]
   var rulesByPair: Table[ZPKey, seq[Rule]]
@@ -331,16 +451,6 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
         let earlier = rules[i]
         let later = rules[j]
 
-        # Check if later is shadowed by earlier:
-        # 1. earlier's source is same or broader (zone vs host-in-zone)
-        # 2. services/ports overlap
-        # 3. same or broader action scope
-
-        var portShadowed = false
-
-        let srcShadowed = endpointShadows(earlier.src, later.src)
-        let dstShadowed = endpointShadows(earlier.dst, later.dst)
-
         # Port/service overlap check
         # Rules with saddr_list are specific to that list -- don't shadow
         # unless the later rule also has the same saddr_list
@@ -348,23 +458,40 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
           continue  # different IP lists, not a shadow
         if later.saddrList != "" and earlier.saddrList != later.saddrList:
           continue
+        # Rules with different daddrList or daddrRaw don't shadow each other
+        if earlier.daddrList != later.daddrList:
+          continue
+        if earlier.daddrRaw != later.daddrRaw:
+          continue
 
-        # If earlier has no service/proto filter and no saddr_list, it matches everything
-        if earlier.service.isNone and earlier.proto.len == 0 and earlier.saddrList == "":
-          portShadowed = true
-        elif earlier.service.isSome and later.service.isSome:
-          if earlier.service.get.name == later.service.get.name:
-            portShadowed = true
-        elif earlier.proto == later.proto and earlier.port == later.port:
-          if earlier.proto.len > 0:  # both have same non-empty proto/port
-            portShadowed = true
+        let srcShadowed = endpointShadows(earlier.src, later.src)
+        let dstShadowed = endpointShadows(earlier.dst, later.dst)
+        let portOverlap = serviceOverlaps(earlier, later)
 
-        if srcShadowed and dstShadowed and portShadowed:
+        if srcShadowed and dstShadowed and portOverlap:
+          # Standard shadow: later rule can never fire
           msgs.add ValidationMsg(
             severity: svWarning,
             msg: "rule at line " & $later.line & " is shadowed by rule at line " &
                  $earlier.line & " (in " & key.src & " -> " & key.dst & ")",
             line: later.line,
           )
+
+        # Permissive shadow detection (CVE-2005-2317 class):
+        # Warn when an accept rule precedes a drop/reject rule with overlapping
+        # criteria, since the accept will match first making the drop ineffective.
+        if earlier.action == actAccept and later.action in {actDrop, actReject}:
+          let revSrc = endpointShadows(earlier.src, later.src)
+          let revDst = endpointShadows(earlier.dst, later.dst)
+          let revPort = serviceOverlaps(earlier, later)
+          if revSrc and revDst and revPort:
+            msgs.add ValidationMsg(
+              severity: svWarning,
+              msg: "accept rule at line " & $earlier.line & " precedes " &
+                   $(later.action) & " rule at line " & $later.line &
+                   " with overlapping criteria — the " & $(later.action) &
+                   " may be ineffective (in " & key.src & " -> " & key.dst & ")",
+              line: later.line,
+            )
 
   return msgs

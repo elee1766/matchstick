@@ -86,6 +86,7 @@ router.addRoute("GET", "/playground/", serveCachedPlayground)
 router.addRoute("GET", "/static/*", staticFile)
 
 let port = parseInt(getEnv("PORT", "8888"))
-echo "matchstick web server listening on http://localhost:" & $port
+let bindAddr = getEnv("BIND_ADDR", "127.0.0.1")
+echo "matchstick web server listening on http://" & bindAddr & ":" & $port
 let server = newServer(router.toHandler())
-server.serve(Port(port))
+server.serve(Port(port), address = bindAddr)

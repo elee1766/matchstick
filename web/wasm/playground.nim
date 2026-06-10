@@ -22,7 +22,8 @@ proc loadAndRender(luaCode: cstring, format: cstring): cstring {.exportc, cdecl.
   if code.len > maxPlaygroundBytes:
     return cstring($ %*{"error": "config is too large for the playground"})
 
-  let L = luaL_newstate()
+  var allocState: LuaAllocState
+  let L = luaL_newstate_limited(addr allocState, 32 * 1024 * 1024)  # 32 MB for playground
   if L == nil:
     return cstring($ %*{"error": "failed to create Lua state"})
   defer: lua_close(L)

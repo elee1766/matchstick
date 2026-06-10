@@ -15,7 +15,7 @@ proc renderExample*(luaCode: string): string =
   let L = luaL_newstate()
   if L == nil: return "error: failed to create Lua state"
   defer: lua_close(L)
-  luaL_openlibs(L)
+  luaL_openlibs_safe(L)
 
   let state = newFirewallState()
   let (tmpFile, tmpPath) = createTempFile("matchstick_doc_", ".lua")
@@ -47,7 +47,7 @@ proc renderSysctls*(luaCode: string): string =
   let L = luaL_newstate()
   if L == nil: return "error: failed to create Lua state"
   defer: lua_close(L)
-  luaL_openlibs(L)
+  luaL_openlibs_safe(L)
 
   let state = newFirewallState()
   let (tmpFile, tmpPath) = createTempFile("matchstick_doc_", ".lua")

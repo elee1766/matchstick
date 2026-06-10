@@ -72,9 +72,11 @@ matchstick show topology firewall.lua --format=d2   # D2 diagram
 matchstick show json     firewall.lua               # full state as JSON
 ```
 
-By default, configs run in a sandboxed Lua environment without `os`, `io`,
-`package`, or `debug`, and dangerous escape hatches are rejected. Use these only
-for fully trusted, root-owned configs:
+By default, configs run in a restricted Lua environment without `os`, `io`,
+`package`, `debug`, `dofile`, or `loadfile`, and dangerous escape hatches are
+rejected. Configs are still code that can define firewall policy and sysctl
+overrides, so production configs should be fully trusted and root-owned. Use
+these escape hatches only for trusted configs:
 
 ```sh
 matchstick apply --allow-hooks firewall.lua          # allow fw:hook shell commands

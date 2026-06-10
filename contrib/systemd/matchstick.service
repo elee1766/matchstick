@@ -11,7 +11,20 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
 ExecReload=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
-ExecStop=/usr/bin/nft delete table inet matchstick ; /usr/bin/nft delete table inet matchstick_nat
+ExecStop=/bin/sh -c 'printf "delete table inet matchstick\ndelete table inet matchstick_nat\n" | /usr/bin/nft -f -'
+
+# Security hardening
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/proc/sys
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=multi-user.target

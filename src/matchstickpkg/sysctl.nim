@@ -101,9 +101,6 @@ proc deriveSysctls*(state: FirewallState): SysctlSet =
   entries.add SysctlEntry(key: "net.ipv4.conf.default.log_martians", value: "1")
   entries.add SysctlEntry(key: "net.ipv4.conf.all.log_martians", value: "1")
 
-  # --- Console log level (prevent firewall logs flooding console) ---
-  entries.add SysctlEntry(key: "kernel.printk", value: "4 4 1 7")
-
   # --- Apply explicit overrides from fw:sysctl() ---
   # These go last so they can override or unset any derived value
   var seen: Table[string, int]  # key -> index in entries

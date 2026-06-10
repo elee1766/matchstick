@@ -554,6 +554,10 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
 const sysctlValueChars = {' ', '0'..'9', 'a'..'z', 'A'..'Z', '_', '-', '.', ','}
 const maxSysctlValueLen = 256
 
+const allowedSysctlPrefixes = [
+  "net.ipv4.", "net.ipv6.", "net.core.", "net.bridge.", "net.netfilter.",
+]
+
 proc validateSysctlKey(L: LuaState, key: string) =
   if key.len == 0 or key.len > 256:
     discard luaL_error(L, "fw:sysctl: key must be 1-256 chars, got %d", key.len.cint)
@@ -562,6 +566,16 @@ proc validateSysctlKey(L: LuaState, key: string) =
       discard luaL_error(L, "fw:sysctl: key '%s' contains invalid character '%c' (alphanumeric, underscore, dots only)", key.cstring, c)
   if key.startsWith(".") or key.endsWith(".") or ".." in key:
     discard luaL_error(L, "fw:sysctl: key '%s' has invalid dot placement", key.cstring)
+  # Restrict to networking-related sysctl namespaces only.
+  # Non-network sysctls (kernel.*, vm.*, etc.) can weaken system security
+  # (e.g. disabling ASLR, enabling SysRq, changing core_pattern).
+  var allowed = false
+  for prefix in allowedSysctlPrefixes:
+    if key.startsWith(prefix):
+      allowed = true
+      break
+  if not allowed:
+    discard luaL_error(L, "fw:sysctl: key '%s' is outside allowed namespaces (net.ipv4/ipv6/core/bridge/netfilter)", key.cstring)
 
 proc validateSysctlValue(L: LuaState, key, value: string) =
   if value.len == 0 or value.len > maxSysctlValueLen:
@@ -837,14 +851,19 @@ proc fwInclude(L: LuaState): cint {.cdecl.} =
   let configDir = getConfigDir(L)
   let fullPath = absolutePath(configDir / path)
 
-  # Verify the resolved path stays within the original config's directory tree
+  # Verify the resolved path stays within the original config's directory tree.
+  # Use expandFilename (realpath) to resolve symlinks, preventing symlink-based
+  # directory escape (CVE-2004-0647 / CVE-2008-4956 class).
   let configRoot = if state.includedFiles.len > 0:
                      state.includedFiles[0].parentDir
                    else:
                      configDir
-  let normalRoot = absolutePath(configRoot)
-  if not fullPath.startsWith(normalRoot):
-    discard luaL_error(L, "fw:include: resolved path escapes config directory: '%s'", fullPath.cstring)
+  let normalRoot = try: expandFilename(absolutePath(configRoot))
+                   except OSError: absolutePath(configRoot)
+  let resolvedPath = try: expandFilename(fullPath)
+                     except OSError: fullPath
+  if not resolvedPath.startsWith(normalRoot & "/") and resolvedPath != normalRoot:
+    discard luaL_error(L, "fw:include: resolved path escapes config directory: '%s'", resolvedPath.cstring)
 
   if not fileExists(fullPath):
     discard luaL_error(L, "fw:include: file not found: '%s'", fullPath.cstring)

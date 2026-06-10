@@ -61,7 +61,8 @@ If no config file is specified, searches:"""
   quit(1)
 
 proc loadConfig(configFile: string): FirewallState =
-  let L = luaL_newstate()
+  var allocState: LuaAllocState
+  let L = luaL_newstate_limited(addr allocState)
   if L == nil:
     raise newException(CatchableError, "failed to create Lua state")
   defer: lua_close(L)
