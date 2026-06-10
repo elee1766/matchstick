@@ -52,6 +52,12 @@ type
   LuaCFunction* = proc(L: LuaState): cint {.cdecl.}
     ## C function callable from Lua
 
+  LuaDebug* = pointer
+    ## Opaque pointer to lua_Debug. We only need it for hook callbacks.
+
+  LuaHook* = proc(L: LuaState, ar: LuaDebug) {.cdecl.}
+    ## Hook callback used by lua_sethook.
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -85,6 +91,9 @@ const
 
   # Multiple returns
   LUA_MULTRET* = -1.cint
+
+  # Hook masks
+  LUA_MASKCOUNT* = 8.cint
 
 # ---------------------------------------------------------------------------
 # State management
@@ -133,6 +142,8 @@ proc luaL_loadfile*(L: LuaState, filename: cstring): cint =
 
 proc lua_pcall*(L: LuaState, nargs, nresults, errfunc: cint): cint =
   lua_pcallk(L, nargs, nresults, errfunc, 0, nil)
+
+proc lua_sethook*(L: LuaState, f: LuaHook, mask, count: cint) {.importc, cdecl.}
 
 # ---------------------------------------------------------------------------
 # Stack manipulation
@@ -301,3 +312,11 @@ proc luaCheckError*(L: LuaState, status: cint) =
                 "unknown error (status " & $status & ")"
     lua_pop(L, 1)
     raise newException(CatchableError, msg)
+
+proc instructionLimitHook(L: LuaState, ar: LuaDebug) {.cdecl.} =
+  discard luaL_error(L, "Lua instruction limit exceeded")
+
+proc luaSetInstructionLimit*(L: LuaState, instructionCount: int) =
+  ## Abort Lua execution after roughly instructionCount VM instructions.
+  if instructionCount > 0:
+    lua_sethook(L, instructionLimitHook, LUA_MASKCOUNT, instructionCount.cint)

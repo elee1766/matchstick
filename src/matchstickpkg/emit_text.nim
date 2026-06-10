@@ -5,6 +5,23 @@ import ./nft_ir
 import ./writer
 
 # ---------------------------------------------------------------------------
+# String escaping for nftables text output
+# ---------------------------------------------------------------------------
+
+proc escapeNftString*(s: string): string =
+  ## Escape a string for safe inclusion in nftables quoted contexts.
+  ## Prevents injection via embedded quotes, backslashes, or newlines.
+  result = newStringOfCap(s.len)
+  for c in s:
+    case c
+    of '"':  result.add '\\'; result.add '"'
+    of '\\': result.add '\\'; result.add '\\'
+    of '\n': result.add '\\'; result.add 'n'
+    of '\r': result.add '\\'; result.add 'r'
+    of '\0': discard  # strip null bytes
+    else:    result.add c
+
+# ---------------------------------------------------------------------------
 # Expr → text
 # ---------------------------------------------------------------------------
 
@@ -67,7 +84,7 @@ proc toMatchLeft*(e: Expr): string =
 proc toQuoted*(e: Expr): string =
   if e == nil: return "null"
   case e.kind
-  of ekString: "\"" & e.strVal & "\""
+  of ekString: "\"" & escapeNftString(e.strVal) & "\""
   else: e.toText
 
 # ---------------------------------------------------------------------------
@@ -115,7 +132,7 @@ proc nftJsonToText*(j: JsonNode): string =
     if "log" in j:
       let l = j["log"]
       var s = "log"
-      if "prefix" in l: s &= " prefix \"" & l["prefix"].getStr() & "\""
+      if "prefix" in l: s &= " prefix \"" & escapeNftString(l["prefix"].getStr()) & "\""
       if "level" in l: s &= " level " & l["level"].getStr()
       return s
     if "limit" in j:
@@ -246,7 +263,7 @@ proc emitStmt*(w: var Writer, s: Stmt) =
     else: w.add "counter"
   of skLog:
     w.add "log"
-    if s.logPrefix != "": w.add " prefix \"" & s.logPrefix & "\""
+    if s.logPrefix != "": w.add " prefix \"" & escapeNftString(s.logPrefix) & "\""
     if s.logLevel != "": w.add " level " & s.logLevel
   of skLimit:
     w.add "limit rate "
@@ -287,7 +304,7 @@ proc emitRuleLine(w: var Writer, stmts: seq[Stmt], comment: string) =
   for i, s in stmts:
     if i > 0: w.add " "
     w.emitStmt(s)
-  if comment != "": w.add " comment \"" & comment & "\""
+  if comment != "": w.add " comment \"" & escapeNftString(comment) & "\""
   w.buf.add '\n'
   w.atLineStart = true
 

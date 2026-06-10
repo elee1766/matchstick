@@ -201,6 +201,7 @@ proc fwService(L: LuaState): cint {.cdecl.} =
   let line = getCurrentLine(L)
 
   let name = $luaL_checkstring(L, 2)
+  checkIdent(L, name, "fw:service")
   let entries = parseServiceArgs(L, 3)
 
   if entries.len == 0:
@@ -449,6 +450,7 @@ proc fwIplist(L: LuaState): cint {.cdecl.} =
   let line = getCurrentLine(L)
 
   let name = $luaL_checkstring(L, 2)
+  checkIdent(L, name, "fw:iplist")
   luaL_checktype(L, 3, LUA_TTABLE)
 
   var iplist = IpList(
@@ -515,7 +517,11 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
     state.config.logPrefix = lp
 
   let ll = getStringField(L, 2, "log_level")
-  if ll != "": state.config.logLevel = ll
+  if ll != "":
+    const validLogLevels = ["emerg", "alert", "crit", "err", "warn", "notice", "info", "debug"]
+    if ll notin validLogLevels:
+      discard luaL_error(L, "fw:config: log_level must be one of emerg/alert/crit/err/warn/notice/info/debug, got '%s'", ll.cstring)
+    state.config.logLevel = ll
 
   let fam = getStringField(L, 2, "family")
   if fam != "":
@@ -545,6 +551,9 @@ proc fwConfig(L: LuaState): cint {.cdecl.} =
 # fw:sysctl(key, value) or fw:sysctl({ key = value, ... })
 # ---------------------------------------------------------------------------
 
+const sysctlValueChars = {' ', '0'..'9', 'a'..'z', 'A'..'Z', '_', '-', '.', ','}
+const maxSysctlValueLen = 256
+
 proc validateSysctlKey(L: LuaState, key: string) =
   if key.len == 0 or key.len > 256:
     discard luaL_error(L, "fw:sysctl: key must be 1-256 chars, got %d", key.len.cint)
@@ -553,6 +562,15 @@ proc validateSysctlKey(L: LuaState, key: string) =
       discard luaL_error(L, "fw:sysctl: key '%s' contains invalid character '%c' (alphanumeric, underscore, dots only)", key.cstring, c)
   if key.startsWith(".") or key.endsWith(".") or ".." in key:
     discard luaL_error(L, "fw:sysctl: key '%s' has invalid dot placement", key.cstring)
+
+proc validateSysctlValue(L: LuaState, key, value: string) =
+  if value.len == 0 or value.len > maxSysctlValueLen:
+    discard luaL_error(L, "fw:sysctl: value for '%s' must be 1-%d chars, got %d",
+                       key.cstring, maxSysctlValueLen.cint, value.len.cint)
+  for c in value:
+    if c notin sysctlValueChars:
+      discard luaL_error(L, "fw:sysctl: value for '%s' contains unsafe character (0x%02x)",
+                         key.cstring, ord(c).cint)
 
 proc fwSysctl(L: LuaState): cint {.cdecl.} =
   ## fw:sysctl("key", "value")  -- set a sysctl
@@ -568,9 +586,11 @@ proc fwSysctl(L: LuaState): cint {.cdecl.} =
       state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
     elif lua_type(L, 3) == LUA_TSTRING:
       let value = $lua_tostring(L, 3)
+      validateSysctlValue(L, key, value)
       state.sysctlOverrides.add SysctlEntry(key: key, value: value)
     elif lua_isinteger(L, 3) != 0:
       let value = $lua_tointeger(L, 3)
+      validateSysctlValue(L, key, value)
       state.sysctlOverrides.add SysctlEntry(key: key, value: value)
     else:
       discard luaL_error(L, "fw:sysctl: value must be a string, integer, or false")
@@ -584,9 +604,11 @@ proc fwSysctl(L: LuaState): cint {.cdecl.} =
           state.sysctlOverrides.add SysctlEntry(key: key, unset: true)
         elif lua_type(L, -1) == LUA_TSTRING:
           let value = $lua_tostring(L, -1)
+          validateSysctlValue(L, key, value)
           state.sysctlOverrides.add SysctlEntry(key: key, value: value)
         elif lua_isinteger(L, -1) != 0:
           let value = $lua_tointeger(L, -1)
+          validateSysctlValue(L, key, value)
           state.sysctlOverrides.add SysctlEntry(key: key, value: value)
       lua_pop(L, 1)
   else:
@@ -790,14 +812,39 @@ proc fwException(L: LuaState): cint {.cdecl.} =
 # fw:include("path.lua")
 # ---------------------------------------------------------------------------
 
+const maxIncludeDepth = 16
+
 proc fwInclude(L: LuaState): cint {.cdecl.} =
   let state = getState(L)
   let path = $luaL_checkstring(L, 2)
 
+  checkLen(L, path, maxStringLen, "fw:include path")
+
+  # Reject absolute paths — includes must be relative to the config directory
+  if path.isAbsolute:
+    discard luaL_error(L, "fw:include: absolute paths are not allowed: '%s'", path.cstring)
+
+  # Reject path traversal components
+  for component in path.split({'/', '\\'}):
+    if component == "..":
+      discard luaL_error(L, "fw:include: '..' path traversal is not allowed: '%s'", path.cstring)
+
+  # Enforce include depth limit to prevent stack overflow
+  if state.includedFiles.len >= maxIncludeDepth:
+    discard luaL_error(L, "fw:include: maximum include depth (%d) exceeded", maxIncludeDepth.cint)
+
   # Resolve relative to the current config file's directory
   let configDir = getConfigDir(L)
-  let fullPath = if path.isAbsolute: path
-                 else: configDir / path
+  let fullPath = absolutePath(configDir / path)
+
+  # Verify the resolved path stays within the original config's directory tree
+  let configRoot = if state.includedFiles.len > 0:
+                     state.includedFiles[0].parentDir
+                   else:
+                     configDir
+  let normalRoot = absolutePath(configRoot)
+  if not fullPath.startsWith(normalRoot):
+    discard luaL_error(L, "fw:include: resolved path escapes config directory: '%s'", fullPath.cstring)
 
   if not fileExists(fullPath):
     discard luaL_error(L, "fw:include: file not found: '%s'", fullPath.cstring)

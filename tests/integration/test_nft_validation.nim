@@ -299,7 +299,11 @@ suite "golden file configs":
         if not fileExists(cfg):
           skip()
         else:
-          let (text, exitCode) = execCmdEx(matchstickBin & " render " & quoteShell(cfg) & " 2>/dev/null")
+          let flags = case name
+            of "hooks": " --allow-hooks"
+            of "custom_chain", "raw_nft": " --allow-raw-nft"
+            else: ""
+          let (text, exitCode) = execCmdEx(matchstickBin & " render" & flags & " " & quoteShell(cfg) & " 2>/dev/null")
           check exitCode == 0
           if exitCode == 0:
             let nftResult = nftCheck(text)

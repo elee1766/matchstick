@@ -10,6 +10,13 @@
 import std/[options, tables, strutils]
 import ./types
 
+const
+  nftNameChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '-'}
+  nftTokenChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '.', ':', '/'}
+  validProtos = ["tcp", "udp", "icmp", "icmpv6"]
+  validIplistTypes = ["ipv4", "ipv6"]
+  validIplistFlags = ["interval", "timeout", "dynamic"]
+
 type
   Severity* = enum
     svWarning = "warning"
@@ -19,6 +26,44 @@ type
     severity*: Severity
     msg*: string
     line*: int
+
+proc isSafeNftName(s: string): bool =
+  if s.len == 0 or s.len > 64: return false
+  for c in s:
+    if c notin nftNameChars: return false
+  true
+
+proc isSafeNftToken(s: string): bool =
+  if s.len == 0 or s.len > 128: return false
+  for c in s:
+    if c notin nftTokenChars: return false
+  true
+
+proc isPortOrRange(s: string): bool =
+  if s.len == 0: return false
+  let parts = s.split('-')
+  if parts.len notin 1..2: return false
+  try:
+    let lo = parseInt(parts[0])
+    let hi = if parts.len == 2: parseInt(parts[1]) else: lo
+    return lo >= 1 and hi <= 65535 and lo <= hi
+  except ValueError:
+    return false
+
+proc addError(msgs: var seq[ValidationMsg], msg: string, line: int) =
+  msgs.add ValidationMsg(severity: svError, msg: msg, line: line)
+
+proc validateTransportPorts(msgs: var seq[ValidationMsg], ctx, proto: string, ports: seq[string], line: int) =
+  if proto notin ["tcp", "udp"]: return
+  for port in ports:
+    if not isPortOrRange(port):
+      msgs.addError(ctx & ": invalid " & proto & " port/range \"" & port & "\" (must be 1-65535 or lo-hi)", line)
+
+proc validateIcmpTypes(msgs: var seq[ValidationMsg], ctx, proto: string, ports: seq[string], line: int) =
+  if proto notin ["icmp", "icmpv6"]: return
+  for typ in ports:
+    if not isSafeNftName(typ):
+      msgs.addError(ctx & ": invalid " & proto & " type \"" & typ & "\"", line)
 
 proc validate*(state: FirewallState): seq[ValidationMsg] =
   var msgs: seq[ValidationMsg]
@@ -66,63 +111,79 @@ proc validate*(state: FirewallState): seq[ValidationMsg] =
       )
 
   # ------------------------------------------------------------------
-  # Check: port validity in services
+  # Check: port/token validity in services
   # ------------------------------------------------------------------
   for name, svc in state.services:
-    for entry in svc.entries:
-      if entry.proto in ["icmp", "icmpv6"]:
-        continue  # ICMP types are strings, not port numbers
-      if entry.port == "":
-        continue
-      if '-' in entry.port:
-        let parts = entry.port.split('-')
-        if parts.len != 2:
-          msgs.add ValidationMsg(severity: svError,
-            msg: "service \"" & name & "\": invalid port range \"" & entry.port & "\"",
-            line: svc.line)
-        else:
-          try:
-            let lo = parseInt(parts[0])
-            let hi = parseInt(parts[1])
-            if lo > hi:
-              msgs.add ValidationMsg(severity: svError,
-                msg: "service \"" & name & "\": port range start > end: " & entry.port,
-                line: svc.line)
-            if lo < 1 or hi > 65535:
-              msgs.add ValidationMsg(severity: svError,
-                msg: "service \"" & name & "\": port out of range (1-65535): " & entry.port,
-                line: svc.line)
-          except ValueError:
-            msgs.add ValidationMsg(severity: svError,
-              msg: "service \"" & name & "\": non-numeric port: " & entry.port,
-              line: svc.line)
-      else:
-        try:
-          let p = parseInt(entry.port)
-          if p < 1 or p > 65535:
-            msgs.add ValidationMsg(severity: svError,
-              msg: "service \"" & name & "\": port out of range: " & $p,
-              line: svc.line)
-        except ValueError:
-          discard  # could be a named port like "echo-request"
-
-  # ------------------------------------------------------------------
-  # Check: protocol validity
-  # ------------------------------------------------------------------
-  let validProtos = ["tcp", "udp", "icmp", "icmpv6"]
-  for name, svc in state.services:
+    if not isSafeNftName(name):
+      msgs.addError("service name \"" & name & "\" is invalid", svc.line)
     for entry in svc.entries:
       if entry.proto notin validProtos:
         msgs.add ValidationMsg(severity: svError,
           msg: "service \"" & name & "\": unknown protocol \"" & entry.proto & "\"",
           line: svc.line)
+        continue
+      if entry.proto in ["icmp", "icmpv6"]:
+        validateIcmpTypes(msgs, "service \"" & name & "\"", entry.proto, @[entry.port], svc.line)
+        continue
+      if not isPortOrRange(entry.port):
+        msgs.addError("service \"" & name & "\": invalid " & entry.proto &
+          " port/range \"" & entry.port & "\" (must be 1-65535 or lo-hi)", svc.line)
 
+  # ------------------------------------------------------------------
+  # Check: protocol validity
+  # ------------------------------------------------------------------
   for rule in state.rules:
     for proto in rule.proto:
       if proto notin validProtos:
         msgs.add ValidationMsg(severity: svError,
           msg: "rule: unknown protocol \"" & proto & "\"",
           line: rule.line)
+      validateTransportPorts(msgs, "rule", proto, rule.port, rule.line)
+      validateIcmpTypes(msgs, "rule", proto, rule.port, rule.line)
+
+  # ------------------------------------------------------------------
+  # Check: NAT, redirect, and iplist fields are safe nftables atoms
+  # ------------------------------------------------------------------
+  for name, ipl in state.ipLists:
+    if not isSafeNftName(name):
+      msgs.addError("iplist name \"" & name & "\" is invalid", ipl.line)
+    if ipl.ipType notin validIplistTypes:
+      msgs.addError("iplist \"" & name & "\": type must be ipv4 or ipv6", ipl.line)
+    if ipl.flags != "":
+      for flag in ipl.flags.split(','):
+        let f = flag.strip()
+        if f notin validIplistFlags:
+          msgs.addError("iplist \"" & name & "\": invalid flag \"" & f & "\"", ipl.line)
+    for elem in ipl.elements:
+      if not isSafeNftToken(elem):
+        msgs.addError("iplist \"" & name & "\": invalid element \"" & elem & "\"", ipl.line)
+
+  for dnat in state.dnatRules:
+    if dnat.daddr != "" and not isSafeNftToken(dnat.daddr):
+      msgs.addError("fw:dnat: invalid daddr \"" & dnat.daddr & "\"", dnat.line)
+    if dnat.dest != "" and not isSafeNftToken(dnat.dest):
+      msgs.addError("fw:dnat: invalid dest \"" & dnat.dest & "\"", dnat.line)
+    if dnat.destPort < 0 or dnat.destPort > 65535:
+      msgs.addError("fw:dnat: dest_port out of range (1-65535): " & $dnat.destPort, dnat.line)
+    for proto in dnat.proto:
+      if proto notin validProtos:
+        msgs.addError("fw:dnat: unknown protocol \"" & proto & "\"", dnat.line)
+      validateTransportPorts(msgs, "fw:dnat", proto, dnat.port, dnat.line)
+      validateIcmpTypes(msgs, "fw:dnat", proto, dnat.port, dnat.line)
+
+  for snat in state.snatRules:
+    for (field, value) in [("from", snat.fromNet), ("daddr", snat.daddr), ("oif", snat.oif), ("addr", snat.addr4)]:
+      if value != "" and not isSafeNftToken(value):
+        msgs.addError("fw:snat: invalid " & field & " \"" & value & "\"", snat.line)
+    if snat.proto != "" and snat.proto notin validProtos:
+      msgs.addError("fw:snat: unknown protocol \"" & snat.proto & "\"", snat.line)
+    validateTransportPorts(msgs, "fw:snat", snat.proto, snat.port, snat.line)
+
+  for redir in state.redirectRules:
+    for proto in redir.proto:
+      if proto notin ["tcp", "udp"]:
+        msgs.addError("fw:redirect: protocol must be tcp or udp, got \"" & proto & "\"", redir.line)
+      validateTransportPorts(msgs, "fw:redirect", proto, redir.port, redir.line)
 
   # ------------------------------------------------------------------
   # Check: SNAT masquerade/addr mutual exclusivity (already checked in lua_vm,

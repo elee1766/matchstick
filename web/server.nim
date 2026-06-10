@@ -1,6 +1,6 @@
 ## matchstick web server — Mummy + Karax SSR
 
-import std/[os, strutils]
+import std/[os, strutils, uri]
 import mummy, mummy/routers
 
 import ./pages/home
@@ -11,8 +11,16 @@ import ./pages/playground
 # Static pages (pre-rendered at startup)
 # ---------------------------------------------------------------------------
 
+proc addSecurityHeaders(headers: var HttpHeaders) =
+  headers["X-Content-Type-Options"] = "nosniff"
+  headers["Referrer-Policy"] = "no-referrer"
+  headers["X-Frame-Options"] = "DENY"
+  headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+  headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
 proc serveStatic(request: Request, content: string, contentType = "text/html") {.gcsafe.} =
   var headers: HttpHeaders
+  headers.addSecurityHeaders()
   headers["Content-Type"] = contentType & "; charset=utf-8"
   headers["Cache-Control"] = "public, max-age=3600"
   request.respond(200, headers, content)
@@ -36,11 +44,16 @@ proc serveCachedPlayground(request: Request) =
   {.cast(gcsafe).}: serveStatic(request, cachedPlayground)
 
 proc staticFile(request: Request) =
-  let relPath = request.uri.replace("/static/", "")
-  if ".." in relPath or relPath.startsWith("/"):
+  # Extract the path after /static/ and decode percent-encoded characters
+  var relPath = request.uri.replace("/static/", "")
+  relPath = relPath.decodeUrl()
+  # Resolve and normalize the full path, then verify it stays within the static dir
+  let staticRoot = absolutePath("web/static")
+  let resolved = absolutePath(staticRoot / relPath)
+  if not resolved.startsWith(staticRoot & "/") and resolved != staticRoot:
     request.respond(403)
     return
-  let path = "web/static" / relPath
+  let path = resolved
   if not fileExists(path):
     request.respond(404)
     return
@@ -55,6 +68,7 @@ proc staticFile(request: Request) =
     of ".wasm": "application/wasm"
     else: "application/octet-stream"
   var headers: HttpHeaders
+  headers.addSecurityHeaders()
   headers["Content-Type"] = ct
   headers["Cache-Control"] = "public, max-age=86400"
   request.respond(200, headers, readFile(path))

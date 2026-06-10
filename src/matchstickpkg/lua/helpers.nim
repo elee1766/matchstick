@@ -26,8 +26,11 @@ const
 proc getState*(L: LuaState): FirewallState =
   ## Retrieve the FirewallState pointer from the Lua registry.
   discard lua_getfield(L, LUA_REGISTRYINDEX, stateRegistryKey)
-  result = cast[FirewallState](lua_touserdata(L, -1))
+  let p = lua_touserdata(L, -1)
   lua_pop(L, 1)
+  if p == nil:
+    discard luaL_error(L, "internal error: firewall state not found in registry")
+  result = cast[FirewallState](p)
 
 proc getConfigDir*(L: LuaState): string =
   discard lua_getfield(L, LUA_REGISTRYINDEX, configDirRegistryKey)

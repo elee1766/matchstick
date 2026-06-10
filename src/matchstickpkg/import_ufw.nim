@@ -8,6 +8,18 @@
 
 import std/[strutils, sequtils, tables, sets, os, options, hashes]
 
+proc escapeLuaString(s: string): string =
+  ## Escape a string for safe inclusion in a Lua double-quoted string literal.
+  result = newStringOfCap(s.len)
+  for c in s:
+    case c
+    of '"':  result.add '\\'  ; result.add '"'
+    of '\\': result.add '\\'; result.add '\\'
+    of '\n': result.add '\\'; result.add 'n'
+    of '\r': result.add '\\'; result.add 'r'
+    of '\0': discard  # strip null bytes
+    else:    result.add c
+
 type
   UfwAction = enum
     ufwAllow, ufwDeny, ufwReject, ufwLimit
@@ -219,9 +231,9 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
   for pp, name in svcMap:
     let port = pp.port.replace(":", "-")  # UFW uses ":" for ranges, nftables uses "-"
     if pp.proto != "":
-      lines.add "local " & name & " = fw:service(\"" & name & "\", \"" & pp.proto & "\", \"" & port & "\")"
+      lines.add "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", \"" & escapeLuaString(pp.proto) & "\", \"" & escapeLuaString(port) & "\")"
     else:
-      lines.add "local " & name & " = fw:service(\"" & name & "\", {\"tcp\", \"udp\"}, \"" & port & "\")"
+      lines.add "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", {\"tcp\", \"udp\"}, \"" & escapeLuaString(port) & "\")"
   lines.add ""
 
   # Emit zones
@@ -245,7 +257,7 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
         of "docker0": "docker"
         else: iface.replace("-", "_").replace("+", "")
       zoneNames[iface] = zn
-      lines.add "local " & zn & " = fw:zone(\"" & zn & "\", \"" & iface & "\")"
+      lines.add "local " & zn & " = fw:zone(\"" & escapeLuaString(zn) & "\", \"" & escapeLuaString(iface) & "\")"
 
   # If no interfaces from rules, we still need a default zone for non-interface rules
   let defaultZone = if zoneNames.len > 0: zoneNames.values.toSeq[0] else: "net"
@@ -274,7 +286,7 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
     lines.add "-- Hosts"
     lines.add "---------------------------------------------------------------------------"
     for addr, name in hostNames:
-      lines.add "local " & name & " = fw:host(\"" & name & "\", { zone = " & defaultZone & ", addr = \"" & addr & "\" })"
+      lines.add "local " & name & " = fw:host(\"" & escapeLuaString(name) & "\", { zone = " & defaultZone & ", addr = \"" & escapeLuaString(addr) & "\" })"
     lines.add ""
 
   # Emit IP lists for subnets
@@ -286,7 +298,7 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
       let octets = addr.split("/")[0].split(".")
       let name = "net_" & octets[0] & "_" & octets[1]
       hostNames[addr] = name  # reuse hostNames for lookup
-      lines.add "fw:iplist(\"" & name & "\", { type = \"ipv4\", flags = \"interval\", elements = { \"" & addr & "\" } })"
+      lines.add "fw:iplist(\"" & escapeLuaString(name) & "\", { type = \"ipv4\", flags = \"interval\", elements = { \"" & escapeLuaString(addr) & "\" } })"
     lines.add ""
 
   # Emit policies
@@ -308,7 +320,8 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
   for r in rules:
     var commentStr = ""
     if r.comment != "":
-      commentStr = "  -- " & r.comment
+      # Strip newlines from comments to prevent Lua code injection
+      commentStr = "  -- " & r.comment.replace("\n", " ").replace("\r", " ")
 
     let action = case r.action
       of ufwAllow: "accept"
@@ -355,11 +368,11 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
           lines.add "})" & commentStr
         elif r.fromAddr != "" and "/" in r.fromAddr and r.fromAddr in hostNames:
           # Subnet source needs saddr_list
-          lines.add "fw:rule(\"*\", " & dst & ", \"" & action & "\", { service = " & svcName & ", saddr_list = \"" & hostNames[r.fromAddr] & "\" })" & commentStr
+          lines.add "fw:rule(\"*\", " & dst & ", \"" & action & "\", { service = " & svcName & ", saddr_list = \"" & escapeLuaString(hostNames[r.fromAddr]) & "\" })" & commentStr
         else:
           lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", " & svcName & ")" & commentStr
       else:
-        lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { proto = \"" & r.proto & "\", port = \"" & r.port.replace(":", "-") & "\" })" & commentStr
+        lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { proto = \"" & escapeLuaString(r.proto) & "\", port = \"" & escapeLuaString(r.port.replace(":", "-")) & "\" })" & commentStr
 
   lines.add ""
   return lines.join("\n") & "\n"

@@ -13,6 +13,8 @@ proc layout*(title: string, content: VNode): string =
     head:
       meta(charset="utf-8")
       meta(name="viewport", content="width=device-width, initial-scale=1")
+      meta(name="referrer", content="no-referrer")
+      verbatim """<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">"""
       title: text title & " — matchstick"
       link(rel="preconnect", href="https://fonts.googleapis.com")
       link(rel="preconnect", href="https://fonts.gstatic.com", crossorigin="")

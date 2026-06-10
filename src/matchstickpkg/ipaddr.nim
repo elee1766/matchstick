@@ -29,6 +29,11 @@ proc parseIpv4*(s: string): Ipv4Addr =
     raise newException(ValueError, "invalid IPv4: " & s)
   var val: uint32 = 0
   for i, p in parts:
+    if p.len == 0:
+      raise newException(ValueError, "invalid IPv4: empty octet in " & s)
+    # Reject leading zeros to prevent octal ambiguity (e.g. "010" != "10")
+    if p.len > 1 and p[0] == '0':
+      raise newException(ValueError, "invalid IPv4 octet: leading zero in '" & p & "' (use " & $parseInt(p) & " instead)")
     let octet = parseInt(p)
     if octet < 0 or octet > 255:
       raise newException(ValueError, "invalid IPv4 octet: " & p)

@@ -47,7 +47,7 @@ suite "Golden file: text output":
 
 suite "Small configs render successfully":
   for name in ["config", "multi_iface", "include_main", "docker", "named_rate", "minimal",
-                "hooks", "custom_chain", "raw_nft", "exceptions", "tier2_features"]:
+                "exceptions", "tier2_features"]:
     test name & ".lua renders":
       let cfg = testdataDir / (name & ".lua")
       let (output, exitCode) = runMatchstick("render", cfg)
@@ -59,6 +59,11 @@ suite "Small configs render successfully":
       let (output, exitCode) = runMatchstick("render", "--json", cfg)
       check exitCode == 0
       check output.strip().startsWith("{")
+
+  test "hooks.lua renders with explicit hook opt-in":
+    let (output, exitCode) = runMatchstick("render", "--allow-hooks", testdataDir / "hooks.lua")
+    check exitCode == 0
+    check output.len > 0
 
 suite "Config customization":
   test "custom table name in output":
@@ -166,38 +171,38 @@ suite "Show commands":
 
 suite "Custom chains (fw:chain)":
   test "custom chain appears in output":
-    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    let (output, exitCode) = runMatchstick("render", "--allow-raw-nft", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check "custom_filter_prerouting_0" in output
 
   test "custom chain has correct hook and priority":
-    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    let (output, exitCode) = runMatchstick("render", "--allow-raw-nft", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check "hook prerouting" in output
     # mangle priority = -150, offset = 5, so -145
     check "filter - 145" in output
 
   test "custom chain contains rules from JSON":
-    let (output, exitCode) = runMatchstick("render", testdataDir / "custom_chain.lua")
+    let (output, exitCode) = runMatchstick("render", "--allow-raw-nft", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check "iifname" in output
     check "mark set" in output
     check "tcp dport" in output
 
   test "custom chain JSON output is valid":
-    let (output, exitCode) = runMatchstick("render", "--json", testdataDir / "custom_chain.lua")
+    let (output, exitCode) = runMatchstick("render", "--json", "--allow-raw-nft", testdataDir / "custom_chain.lua")
     check exitCode == 0
     check output.strip().startsWith("{")
 
 suite "Raw nftables escape hatch (fw:raw_nft)":
   test "raw nft JSON commands appear in text output":
-    let (output, exitCode) = runMatchstick("render", testdataDir / "raw_nft.lua")
+    let (output, exitCode) = runMatchstick("render", "--allow-raw-nft", testdataDir / "raw_nft.lua")
     check exitCode == 0
     check "chain my_custom_chain" in output
     check "accept" in output
 
   test "raw nft JSON commands pass through to JSON output":
-    let (output, exitCode) = runMatchstick("render", "--json", testdataDir / "raw_nft.lua")
+    let (output, exitCode) = runMatchstick("render", "--json", "--allow-raw-nft", testdataDir / "raw_nft.lua")
     check exitCode == 0
     check "my_custom_chain" in output
     check "12345" in output

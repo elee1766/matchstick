@@ -72,6 +72,15 @@ matchstick show topology firewall.lua --format=d2   # D2 diagram
 matchstick show json     firewall.lua               # full state as JSON
 ```
 
+By default, configs run in a sandboxed Lua environment without `os`, `io`,
+`package`, or `debug`, and dangerous escape hatches are rejected. Use these only
+for fully trusted, root-owned configs:
+
+```sh
+matchstick apply --allow-hooks firewall.lua          # allow fw:hook shell commands
+matchstick apply --allow-raw-nft firewall.lua        # allow fw:chain/fw:raw_nft
+```
+
 ## Build
 
 ```sh

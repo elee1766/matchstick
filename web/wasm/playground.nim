@@ -1,7 +1,7 @@
 ## WASM entry point for the playground.
 ## Exports loadAndRender() callable from JS via Module.ccall.
 
-import std/[json, options, tables, sequtils, strutils]
+import std/[json, tables, sequtils, strutils]
 import ../../src/lua54/ffi
 import ../../src/matchstickpkg/types
 import ../../src/matchstickpkg/lua/api
@@ -11,9 +11,16 @@ import ../../src/matchstickpkg/emit_json
 import ../../src/matchstickpkg/validate
 import ../../src/matchstickpkg/sysctl
 
+const
+  maxPlaygroundBytes = 64 * 1024
+  playgroundInstructionLimit = 2_000_000
+
 proc loadAndRender(luaCode: cstring, format: cstring): cstring {.exportc, cdecl.} =
   let code = $luaCode
   let fmt = $format
+
+  if code.len > maxPlaygroundBytes:
+    return cstring($ %*{"error": "config is too large for the playground"})
 
   let L = luaL_newstate()
   if L == nil:
@@ -21,6 +28,7 @@ proc loadAndRender(luaCode: cstring, format: cstring): cstring {.exportc, cdecl.
   defer: lua_close(L)
 
   luaL_openlibs_safe(L)
+  luaSetInstructionLimit(L, playgroundInstructionLimit)
 
   let state = newFirewallState()
   setupLuaVM(L, state, "playground.lua")

@@ -20,6 +20,7 @@ const
   defaultConfigPaths = [
     "/etc/matchstick/firewall.lua",
   ]
+  luaInstructionLimit = 10_000_000
 
 proc findConfig(): string =
   for path in defaultConfigPaths:
@@ -40,6 +41,10 @@ Usage:
   matchstick diff   [config.lua]                    Diff running vs generated"""
 
   stderr.writeLine """
+Options:
+  --allow-hooks                                      Allow fw:hook shell commands
+  --allow-raw-nft                                    Allow fw:chain/fw:raw_nft escape hatches
+
   matchstick show matrix   [config.lua]             Zone policy matrix
   matchstick show rules    [config.lua] <src> <dst> Rules for zone pair
   matchstick show topology [config.lua]             Topology diagram
@@ -61,7 +66,8 @@ proc loadConfig(configFile: string): FirewallState =
     raise newException(CatchableError, "failed to create Lua state")
   defer: lua_close(L)
 
-  luaL_openlibs(L)
+  luaL_openlibs_safe(L)
+  luaSetInstructionLimit(L, luaInstructionLimit)
 
   let state = newFirewallState()
   setupLuaVM(L, state, configFile)
@@ -118,6 +124,8 @@ type
     configFile: string
     jsonOutput: bool
     noSysctl: bool        ## skip sysctl application
+    allowHooks: bool      ## allow fw:hook shell commands
+    allowRawNft: bool     ## allow fw:chain/fw:raw_nft escape hatches
     format: string        ## topology format
     extraArgs: seq[string]
 
@@ -135,6 +143,8 @@ proc parseCli(): CliOpts =
       case key
       of "json", "j": result.jsonOutput = true
       of "no-sysctl": result.noSysctl = true
+      of "allow-hooks": result.allowHooks = true
+      of "allow-raw-nft": result.allowRawNft = true
       of "format": result.format = val
       of "help", "h": usage()
       else:
@@ -175,12 +185,22 @@ proc requireConfig(opts: CliOpts) =
     stderr.writeLine "error: file not found: " & opts.configFile
     quit(1)
 
+proc enforceEscapeHatches(opts: CliOpts, state: FirewallState) =
+  if not opts.allowHooks and (state.hooks.preStart != "" or state.hooks.postStart != "" or
+      state.hooks.preStop != "" or state.hooks.postStop != ""):
+    stderr.writeLine "error: config uses fw:hook shell commands; rerun with --allow-hooks if this config is trusted"
+    quit(1)
+  if not opts.allowRawNft and (state.rawNft.len > 0 or state.customChains.len > 0):
+    stderr.writeLine "error: config uses fw:chain/fw:raw_nft escape hatches; rerun with --allow-raw-nft if this config is trusted"
+    quit(1)
+
 # ---------------------------------------------------------------------------
 # Commands: always available (pure computation)
 # ---------------------------------------------------------------------------
 
 proc cmdCheck(opts: CliOpts) =
   let state = loadConfig(opts.configFile)
+  enforceEscapeHatches(opts, state)
   let ok = runValidation(state)
   printSummary(state)
   let sysctls = deriveSysctls(state)
@@ -193,6 +213,7 @@ proc cmdCheck(opts: CliOpts) =
 
 proc cmdRender(opts: CliOpts) =
   let state = loadConfig(opts.configFile)
+  enforceEscapeHatches(opts, state)
   let ok = runValidation(state)
   if not ok:
     stderr.writeLine "error: config has validation errors"
@@ -205,6 +226,7 @@ proc cmdRender(opts: CliOpts) =
 
 proc cmdShow(opts: CliOpts) =
   let state = loadConfig(opts.configFile)
+  enforceEscapeHatches(opts, state)
   discard runValidation(state)
 
   case opts.showSub
@@ -247,6 +269,7 @@ proc cmdImportUfw() =
 when not defined(noSystem):
   proc cmdApply(opts: CliOpts) =
     let state = loadConfig(opts.configFile)
+    enforceEscapeHatches(opts, state)
     let ok = runValidation(state)
     if not ok:
       stderr.writeLine "error: config has validation errors, refusing to apply"
@@ -324,6 +347,7 @@ when not defined(noSystem):
 
   proc cmdDiff(opts: CliOpts) =
     let state = loadConfig(opts.configFile)
+    enforceEscapeHatches(opts, state)
     discard runValidation(state)
     let ruleset = buildRuleset(state)
     let generated = emitText(ruleset)

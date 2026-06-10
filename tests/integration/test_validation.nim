@@ -6,11 +6,12 @@ import std/[os, osproc, strutils]
 const projectRoot = currentSourcePath().parentDir().parentDir().parentDir()
 const matchstickBin = projectRoot / "matchstick"
 
-proc checkLua(code: string): tuple[output: string, exitCode: int] =
+proc checkLua(code: string, extraArgs: string = ""): tuple[output: string, exitCode: int] =
   ## Write Lua code to a temp file and run matchstick check on it.
   let tmpFile = getTempDir() / "matchstick_test.lua"
   writeFile(tmpFile, code)
-  let (output, exitCode) = execCmdEx(matchstickBin & " check " & quoteShell(tmpFile))
+  let args = if extraArgs == "": "" else: extraArgs & " "
+  let (output, exitCode) = execCmdEx(matchstickBin & " check " & args & quoteShell(tmpFile))
   removeFile(tmpFile)
   (output, exitCode)
 
@@ -159,8 +160,16 @@ suite "Custom chain validation":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
       fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { { { accept = {} } } } })
-    """)
+    """, "--allow-raw-nft")
     check exitCode == 0
+
+  test "custom chain requires explicit opt-in":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { { { accept = {} } } } })
+    """)
+    check exitCode == 1
+    check "--allow-raw-nft" in output
 
 suite "Exception validation":
   test "invalid chain name rejected":
@@ -200,7 +209,7 @@ suite "Raw nft validation":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
       fw:raw_nft({ add = { chain = { family = "inet", table = "matchstick", name = "test" } } })
-    """)
+    """, "--allow-raw-nft")
     check exitCode == 0
 
 suite "Hook configuration":
@@ -208,8 +217,25 @@ suite "Hook configuration":
     let (output, exitCode) = checkLua("""
       local self = fw:zone("fw")
       fw:hook({ pre_start = "echo hello", post_start = "echo world" })
-    """)
+    """, "--allow-hooks")
     check exitCode == 0
+
+  test "hooks require explicit opt-in":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:hook({ pre_start = "echo hello" })
+    """)
+    check exitCode == 1
+    check "--allow-hooks" in output
+
+suite "Lua sandbox":
+  test "os library is not available to configs":
+    let (output, exitCode) = checkLua("""
+      os.execute("echo unsafe")
+      local self = fw:zone("fw")
+    """)
+    check exitCode == 1
+    check "os" in output
 
 suite "Redirect validation":
   test "missing iface rejected":
