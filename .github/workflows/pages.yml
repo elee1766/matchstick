@@ -46,15 +46,12 @@ jobs:
             --cc:clang --clang.exe:emcc --clang.linkerexe:emcc \
             --passC:"-s WASM=1" \
             --passL:"-s EXPORTED_FUNCTIONS=[_loadAndRender] -s EXPORTED_RUNTIME_METHODS=[ccall,cwrap] -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_NAME=createMatchstick" \
-            -o:web/static/playground.js web/wasm/playground.nim
-
-      - name: Build static site
-        run: nim c -d:release -d:ssg -r web/ssg.nim
+            -o:site/static/playground.js site/playground.nim
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: site
 
   deploy:
     needs: build

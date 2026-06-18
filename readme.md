@@ -2,7 +2,13 @@
 
 [![CI](https://github.com/elee1766/matchstick/actions/workflows/ci.yml/badge.svg)](https://github.com/elee1766/matchstick/actions/workflows/ci.yml)
 
-Lua-based nftables firewall configuration tool. Compiles declarative firewall configs into native nftables rulesets with automatic sysctl management, input validation, and shadow rule detection.
+with shorewall slowly falling more and more out of maintainence, i wanted to try to make a tool for declarative config management.
+
+so here is matchstick. it is a lua-based nftables firewall configuration tool.
+
+you write lua code which gets compiled into nftables rulesets with some sysctl rules
+
+similar projects: shorewall, awall, foomuuri
 
 **[Documentation](https://elee1766.github.io/matchstick/)**
 
@@ -66,7 +72,12 @@ matchstick apply  firewall.lua           # apply to kernel (root)
 # diff two rulesets (.lua files are rendered, - is stdin)
 matchstick diff old.lua new.lua
 matchstick diff firewall.lua saved.nft
+
+# check if running rules match config
 nft list table inet matchstick | matchstick diff firewall.lua -
+
+# view running rules directly
+nft list table inet matchstick
 
 matchstick show matrix   firewall.lua              # zone policy matrix
 matchstick show rules    firewall.lua wan fw        # rules for a zone pair
@@ -75,6 +86,22 @@ matchstick show topology firewall.lua --format=dot  # Graphviz DOT
 matchstick show topology firewall.lua --format=d2   # D2 diagram
 matchstick show json     firewall.lua               # full state as JSON
 ```
+
+### msctl
+
+`msctl` is a shell wrapper for day-to-day firewall management. It combines
+`matchstick` (the compiler) with `nft` (the runtime):
+
+```sh
+msctl status        # show running rules (nft list table)
+msctl diff          # diff running rules vs /etc/matchstick/firewall.lua
+msctl check         # validate config
+msctl apply         # apply config to kernel
+msctl flush         # remove all matchstick rules
+msctl edit          # edit config, validate, apply (uses $EDITOR)
+```
+
+Installed alongside matchstick via `make install`.
 
 By default, configs run in a restricted Lua environment without `os`, `io`,
 `package`, `debug`, `dofile`, or `loadfile`, and dangerous escape hatches are

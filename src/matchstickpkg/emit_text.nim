@@ -91,13 +91,97 @@ proc toQuoted*(e: Expr): string =
 # nftables JSON → text (for raw passthrough)
 # ---------------------------------------------------------------------------
 
+proc nftJsonToText*(j: JsonNode): string
+  ## Forward declaration (handlers call back into this for nested expressions).
+
+# nftables JSON → text handlers.
+# The nftables JSON schema uses single-key objects as tagged unions:
+# {"match": {...}}, {"accept": null}, {"payload": {...}}, etc.
+# Each handler takes the inner value and returns text.
+
+proc njtVerdict(tag: string, val: JsonNode): string = tag
+proc njtMatch(tag: string, val: JsonNode): string =
+  nftJsonToText(val.getOrDefault("left")) & " " &
+    val.getOrDefault("op").getStr("==") & " " &
+    nftJsonToText(val.getOrDefault("right"))
+proc njtReject(tag: string, val: JsonNode): string =
+  result = "reject"
+  if "type" in val: result &= " with " & val["type"].getStr()
+  if "expr" in val: result &= " " & val["expr"].getStr()
+proc njtTarget(tag: string, val: JsonNode): string =
+  tag & " " & val.getOrDefault("target").getStr()
+proc njtLog(tag: string, val: JsonNode): string =
+  result = "log"
+  if "prefix" in val: result &= " prefix \"" & escapeNftString(val["prefix"].getStr()) & "\""
+  if "level" in val: result &= " level " & val["level"].getStr()
+proc njtLimit(tag: string, val: JsonNode): string =
+  result = "limit rate "
+  if val.getOrDefault("inv").getBool(false): result &= "over "
+  result &= $val.getOrDefault("rate").getInt() & "/" & val.getOrDefault("per").getStr()
+  let burst = val.getOrDefault("burst").getInt()
+  if burst > 0: result &= " burst " & $burst & " packets"
+proc njtPayload(tag: string, val: JsonNode): string =
+  val.getOrDefault("protocol").getStr() & " " & val.getOrDefault("field").getStr()
+proc njtMeta(tag: string, val: JsonNode): string =
+  let key = val.getOrDefault("key").getStr()
+  case key
+  of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype": key
+  else: "meta " & key
+proc njtCt(tag: string, val: JsonNode): string =
+  result = "ct"
+  if "dir" in val: result &= " " & val["dir"].getStr()
+  result &= " " & val.getOrDefault("key").getStr()
+proc njtPrefix(tag: string, val: JsonNode): string =
+  val.getOrDefault("addr").getStr() & "/" & $val.getOrDefault("len").getInt()
+proc njtRange(tag: string, val: JsonNode): string =
+  if val.kind == JArray and val.len == 2:
+    nftJsonToText(val[0]) & "-" & nftJsonToText(val[1])
+  else: $val
+proc njtConcat(tag: string, val: JsonNode): string =
+  if val.kind == JArray:
+    var parts: seq[string]
+    for elem in val: parts.add nftJsonToText(elem)
+    parts.join(" . ")
+  else: $val
+proc njtSet(tag: string, val: JsonNode): string =
+  if val.kind == JArray:
+    var parts: seq[string]
+    for elem in val: parts.add nftJsonToText(elem)
+    "{ " & parts.join(", ") & " }"
+  elif val.kind == JString: "@" & val.getStr()
+  else: $val
+proc njtMangle(tag: string, val: JsonNode): string =
+  nftJsonToText(val.getOrDefault("key")) & " set " & nftJsonToText(val.getOrDefault("value"))
+proc njtNat(tag: string, val: JsonNode): string =
+  result = tag & " " & val.getOrDefault("family").getStr("ip") & " to " & val.getOrDefault("addr").getStr()
+  let port = val.getOrDefault("port").getInt()
+  if port > 0: result &= ":" & $port
+
+var njtHandlers: Table[string, proc(tag: string, val: JsonNode): string]
+
+proc initNjtHandlers() =
+  for name in ["accept", "drop", "return", "counter", "masquerade"]:
+    njtHandlers[name] = njtVerdict
+  njtHandlers["match"] = njtMatch
+  njtHandlers["reject"] = njtReject
+  njtHandlers["jump"] = njtTarget
+  njtHandlers["goto"] = njtTarget
+  njtHandlers["log"] = njtLog
+  njtHandlers["limit"] = njtLimit
+  njtHandlers["payload"] = njtPayload
+  njtHandlers["meta"] = njtMeta
+  njtHandlers["ct"] = njtCt
+  njtHandlers["prefix"] = njtPrefix
+  njtHandlers["range"] = njtRange
+  njtHandlers["concat"] = njtConcat
+  njtHandlers["set"] = njtSet
+  njtHandlers["mangle"] = njtMangle
+  njtHandlers["dnat"] = njtNat
+  njtHandlers["snat"] = njtNat
+initNjtHandlers()
+
 proc nftJsonToText*(j: JsonNode): string =
-  ## Convert an nftables JSON node (statement or expression) to text.
-  ## The nftables JSON schema uses single-key objects as tagged unions:
-  ## {"match": {...}}, {"accept": null}, {"payload": {...}}, etc.
-  ## We extract the key, then dispatch on it with a case statement.
-  if j == nil or j.kind == JNull:
-    return ""
+  if j == nil or j.kind == JNull: return ""
   case j.kind
   of JString: return j.getStr()
   of JInt: return $j.getInt()
@@ -108,84 +192,12 @@ proc nftJsonToText*(j: JsonNode): string =
     for elem in j: parts.add nftJsonToText(elem)
     return parts.join(" ")
   of JObject:
-    # nftables JSON objects are single-key tagged unions. Extract the tag.
-    var tag = ""
-    var val: JsonNode
-    for k, v in j:
-      tag = k; val = v; break
-    if tag == "": return $j
-
-    case tag
-    of "accept", "drop", "return", "counter", "masquerade":
-      return tag
-    of "match":
-      let left = nftJsonToText(val.getOrDefault("left"))
-      let right = nftJsonToText(val.getOrDefault("right"))
-      let op = val.getOrDefault("op").getStr("==")
-      return left & " " & op & " " & right
-    of "reject":
-      var s = "reject"
-      if "type" in val: s &= " with " & val["type"].getStr()
-      if "expr" in val: s &= " " & val["expr"].getStr()
-      return s
-    of "jump":
-      return "jump " & val.getOrDefault("target").getStr()
-    of "goto":
-      return "goto " & val.getOrDefault("target").getStr()
-    of "log":
-      var s = "log"
-      if "prefix" in val: s &= " prefix \"" & escapeNftString(val["prefix"].getStr()) & "\""
-      if "level" in val: s &= " level " & val["level"].getStr()
-      return s
-    of "limit":
-      var s = "limit rate "
-      if val.getOrDefault("inv").getBool(false): s &= "over "
-      s &= $val.getOrDefault("rate").getInt() & "/" & val.getOrDefault("per").getStr()
-      let burst = val.getOrDefault("burst").getInt()
-      if burst > 0: s &= " burst " & $burst & " packets"
-      return s
-    of "payload":
-      return val.getOrDefault("protocol").getStr() & " " & val.getOrDefault("field").getStr()
-    of "meta":
-      let key = val.getOrDefault("key").getStr()
-      case key
-      of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype": return key
-      else: return "meta " & key
-    of "ct":
-      var s = "ct"
-      if "dir" in val: s &= " " & val["dir"].getStr()
-      s &= " " & val.getOrDefault("key").getStr()
-      return s
-    of "prefix":
-      return val.getOrDefault("addr").getStr() & "/" & $val.getOrDefault("len").getInt()
-    of "range":
-      if val.kind == JArray and val.len == 2:
-        return nftJsonToText(val[0]) & "-" & nftJsonToText(val[1])
-      return $j
-    of "concat":
-      if val.kind == JArray:
-        var parts: seq[string]
-        for elem in val: parts.add nftJsonToText(elem)
-        return parts.join(" . ")
-      return $j
-    of "set":
-      if val.kind == JArray:
-        var parts: seq[string]
-        for elem in val: parts.add nftJsonToText(elem)
-        return "{ " & parts.join(", ") & " }"
-      elif val.kind == JString:
-        return "@" & val.getStr()
-      return $j
-    of "mangle":
-      return nftJsonToText(val.getOrDefault("key")) & " set " & nftJsonToText(val.getOrDefault("value"))
-    of "dnat", "snat":
-      var s = tag & " " & val.getOrDefault("family").getStr("ip") & " to " & val.getOrDefault("addr").getStr()
-      let port = val.getOrDefault("port").getInt()
-      if port > 0: s &= ":" & $port
-      return s
-    else:
-      # Unknown tag — render as compact JSON
-      return $j
+    # nftables JSON objects are single-key tagged unions — extract the tag.
+    for tag, val in j:
+      if tag in njtHandlers:
+        return njtHandlers[tag](tag, val)
+      return $j  # unknown tag
+    return $j    # empty object
   else:
     return $j
 

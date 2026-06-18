@@ -284,6 +284,14 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   let outputPolicy = state.config.outputPolicy
   let dualStack = fam == "inet"  # false for "ip" (IPv4 only)
 
+  # Address family descriptors — iterate instead of if/else v4/v6 branching.
+  type AfDesc = tuple[suffix: string, nftType: string, proto: string, version: string]
+  let ipv4: AfDesc = ("_4", "ipv4_addr", "ip", "4")
+  let ipv6: AfDesc = ("_6", "ipv6_addr", "ip6", "6")
+  let addrFamilies: seq[AfDesc] =
+    if dualStack: @[ipv4, ipv6]
+    else: @[ipv4]
+
   var fwZone: Zone
   var ifaceZones: seq[Zone]
   for name, zone in state.zones:
@@ -307,10 +315,9 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     for e in ipl.elements: elems.add strExpr(e)
     cmds.add addSet(fam, tn, name, nftType, flags, elem = elems)
 
-  # Log rate limiting sets
-  cmds.add addSet(fam, tn, "_lograte_4", "ipv4_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
-  if dualStack:
-    cmds.add addSet(fam, tn, "_lograte_6", "ipv6_addr", @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
+  # Log rate limiting sets (one per address family)
+  for af in addrFamilies:
+    cmds.add addSet(fam, tn, "_lograte" & af.suffix, af.nftType, @["dynamic", "timeout"], size = logSetSize, timeout = logSetTimeout)
 
   # Collect which zone-pair chains will exist
   var pairChainNames: seq[string]
@@ -375,8 +382,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       matchStmt(opEq, payloadExpr("icmpv6", "type"), strExpr("echo-request")),
       limitStmt(10, "second", burst = 5),
       acceptStmt()])
-    # Drop other ICMPv6
-    cmds.add addRule(fam, tn, "icmp_v6", @[dropStmt()])
+    # Drop other ICMPv6 (scoped to ipv6 so IPv4 packets return to the caller)
+    cmds.add addRule(fam, tn, "icmp_v6", @[matchStmt(opEq, metaExpr("nfproto"), strExpr("ipv6")), dropStmt()])
 
   # rpfilter
   if state.laundry.rpfilter:
@@ -436,13 +443,11 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       dropStmt()], "tcp-strict: new non-syn")
     cmds.add addRule(fam, tn, "input", @[jumpStmt("tcp_strict")])
 
-  cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v4")])
-  if dualStack:
-    cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v6")])
+  for af in addrFamilies:
+    cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v" & af.version)])
   cmds.add addRule(fam, tn, "input", @[vmapStmt(metaExpr("iifname"), setRef("input_zones"))])
-  cmds.add logRateRule(fam, tn, "input", "_lograte_4", "ip", logPrefix & " input DROP ")
-  if dualStack:
-    cmds.add logRateRule(fam, tn, "input", "_lograte_6", "ip6", logPrefix & " input DROP ")
+  for af in addrFamilies:
+    cmds.add logRateRule(fam, tn, "input", "_lograte" & af.suffix, af.proto, logPrefix & " input DROP ")
   cmds.add addRule(fam, tn, "input", @[dropStmt()])
 
   # Forward chain
@@ -454,7 +459,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("broadcast")), dropStmt()])
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("multicast")), dropStmt()])
   cmds.add addRule(fam, tn, "forward", @[vmapStmt(concatExpr(@[metaExpr("iifname"), metaExpr("oifname")]), setRef("forward_zones"))])
-  cmds.add logRateRule(fam, tn, "forward", "_lograte_4", "ip", logPrefix & " forward DROP ")
+  for af in addrFamilies:
+    cmds.add logRateRule(fam, tn, "forward", "_lograte" & af.suffix, af.proto, logPrefix & " forward DROP ")
   cmds.add addRule(fam, tn, "forward", @[dropStmt()])
 
   # Output chain
@@ -489,30 +495,30 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
         if not dualStack and br.ipv6Only: continue
         cmds.add addRule(fam, tn, cn, br.stmts)
       if polLog:
-        cmds.add logRateRule(fam, tn, cn, "_lograte_4", "ip", logPrefix & " " & cn & " " & $polAction & " ")
+        for af in addrFamilies:
+          cmds.add logRateRule(fam, tn, cn, "_lograte" & af.suffix, af.proto,
+            logPrefix & " " & cn & " " & $polAction & " ")
       cmds.add addRule(fam, tn, cn, @[actionToStmt(polAction)])
       continue
 
-    let cn4 = cn & "_4"
-    let cn6 = cn & "_6"
+    # Dual-stack split: dispatch by nfproto to per-family sub-chains
     cmds.add addChain(fam, tn, cn)
     cmds.add addRule(fam, tn, cn, @[vmapStmt(metaExpr("nfproto"),
-      anonSetExpr(@[listExpr(@[strExpr("ipv4"), verdictExpr("jump", cn4)]),
-                     listExpr(@[strExpr("ipv6"), verdictExpr("jump", cn6)])]))])
+      anonSetExpr(@[listExpr(@[strExpr("ipv4"), verdictExpr("jump", cn & "_4")]),
+                     listExpr(@[strExpr("ipv6"), verdictExpr("jump", cn & "_6")])]))])
 
-    cmds.add addChain(fam, tn, cn4)
-    for br in pair.builtRules:
-      if not br.ipv6Only: cmds.add addRule(fam, tn, cn4, br.stmts)
-    if polLog:
-      cmds.add logRateRule(fam, tn, cn4, "_lograte_4", "ip", logPrefix & " " & cn & " " & $polAction & " ")
-    cmds.add addRule(fam, tn, cn4, @[actionToStmt(polAction)])
-
-    cmds.add addChain(fam, tn, cn6)
-    for br in pair.builtRules:
-      if not br.ipv4Only: cmds.add addRule(fam, tn, cn6, br.stmts)
-    if polLog:
-      cmds.add logRateRule(fam, tn, cn6, "_lograte_6", "ip6", logPrefix & " " & cn & " " & $polAction & " ")
-    cmds.add addRule(fam, tn, cn6, @[actionToStmt(polAction)])
+    for af in addrFamilies:
+      let subCn = cn & af.suffix
+      let skipOther = af.suffix == "_4"  # _4 chain skips ipv6Only, _6 skips ipv4Only
+      cmds.add addChain(fam, tn, subCn)
+      for br in pair.builtRules:
+        if skipOther and br.ipv6Only: continue
+        if not skipOther and br.ipv4Only: continue
+        cmds.add addRule(fam, tn, subCn, br.stmts)
+      if polLog:
+        cmds.add logRateRule(fam, tn, subCn, "_lograte" & af.suffix, af.proto,
+          logPrefix & " " & cn & " " & $polAction & " ")
+      cmds.add addRule(fam, tn, subCn, @[actionToStmt(polAction)])
 
   # NAT table
   if state.dnatRules.len > 0 or state.snatRules.len > 0 or state.redirectRules.len > 0:

@@ -4,7 +4,7 @@
 ## handle push, endpoint/service/host resolution, action parsing.
 
 import std/[options, tables, strutils, json]
-import ../../lua54/ffi
+import ../../lua55/ffi
 import ../types
 
 const
@@ -228,7 +228,8 @@ proc luaToJson*(L: LuaState, idx: cint, depth: int = 0): JsonNode =
   ## Tables with sequential integer keys [1..n] become JSON arrays;
   ## all others become objects. Mixed tables use the array path only.
   if depth > 50:
-    return newJNull()  # prevent infinite recursion
+    discard luaL_error(L, "table nesting too deep (>50 levels) — possible circular reference")
+    return newJNull()  # unreachable, luaL_error longjmps
 
   let absIdx = lua_absindex(L, idx)
   let t = lua_type(L, absIdx)

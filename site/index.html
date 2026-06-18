@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>home — matchstick</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&amp;display=swap"
+    />
+    <link rel="stylesheet" href="/matchstick/static/tux.css" />
+    <link rel="stylesheet" href="/matchstick/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <a href="/matchstick/">matchstick</a>
+      <nav>
+        <a href="/matchstick/">home</a>
+        <a href="/matchstick/docs/">docs</a>
+        <a href="/matchstick/playground/">playground</a>
+        <a href="https://github.com/elee1766/matchstick" target="_blank"
+          >github</a
+        >
+        <button id="theme-toggle" data-variant="ghost">theme</button>
+      </nav>
+    </header>
+    <main>
+      <div>
+        <h1>matchstick</h1>
+        <p>
+          a lua-based nftables firewall configuration tool. compiles declarative
+          firewall configs into native nftables rulesets with automatic sysctl
+          management, input validation, and shadow rule detection.
+        </p>
+        <p>
+          matchstick replaces tools like ufw, shorewall, and firewalld with a
+          single lua file that is version-controllable, reviewable, and produces
+          identical output every time.
+        </p>
+        <pre><code>local ssh  = fw:service(&quot;ssh&quot;, &quot;tcp&quot;, 22)
+local http = fw:service(&quot;http&quot;, &quot;tcp&quot;, 80)
+local ping = fw:service(&quot;ping&quot;, &quot;icmp&quot;, &quot;echo-request&quot;)
+
+local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+
+fw:policy(wan, self, &quot;drop&quot;, { log = true })
+fw:policy(self, wan, &quot;accept&quot;)
+fw:policy(lan, self, &quot;accept&quot;)
+fw:policy(lan, wan, &quot;accept&quot;)
+
+fw:rule(wan, self, &quot;accept&quot;, ssh)
+fw:rule(wan, self, &quot;accept&quot;, http)
+fw:rule(wan, self, &quot;accept&quot;, ping)
+
+fw:snat({ from = &quot;10.0.0.0&#x2F;8&quot;, oif = &quot;eth0&quot;, masquerade = true })</code></pre>
+        <p>
+          <a href="/matchstick/docs/"><button>documentation</button></a>
+        </p>
+        <hr />
+        <h2>install</h2>
+        <pre><code>git clone https:&#x2F;&#x2F;github.com&#x2F;elee1766&#x2F;matchstick
+cd matchstick
+make install</code></pre>
+        <h2>usage</h2>
+        <pre><code>matchstick check firewall.lua       # validate
+matchstick render firewall.lua      # print nftables output
+matchstick apply firewall.lua       # apply to kernel + set sysctls
+matchstick diff firewall.lua        # diff running vs generated
+matchstick show matrix firewall.lua # zone policy matrix</code></pre>
+        <h2>migrating from ufw</h2>
+        <pre><code>sudo ufw show added | matchstick import-ufw &gt; firewall.lua
+matchstick check firewall.lua
+# edit firewall.lua to adjust zone&#x2F;host names
+matchstick apply firewall.lua</code></pre>
+      </div>
+    </main>
+    <footer>
+      <p>matchstick — lua-based nftables firewall configuration</p>
+    </footer>
+    <script>
+      function getTheme() {
+        return localStorage.getItem("theme") || "auto";
+      }
+      function applyTheme(t) {
+        if (t === "auto")
+          document.documentElement.removeAttribute("data-theme");
+        else document.documentElement.setAttribute("data-theme", t);
+      }
+      function cycleTheme() {
+        var order = ["auto", "light", "dark"];
+        var cur = order.indexOf(getTheme());
+        var next = order[(cur + 1) % 3];
+        localStorage.setItem("theme", next);
+        applyTheme(next);
+        document.getElementById("theme-toggle").textContent =
+          next === "auto" ? "theme" : next;
+      }
+      (function () {
+        var t = getTheme();
+        applyTheme(t);
+        var el = document.getElementById("theme-toggle");
+        if (el) {
+          if (t !== "auto") el.textContent = t;
+          el.addEventListener("click", cycleTheme);
+        }
+      })();
+    </script>
+  </body>
+</html>

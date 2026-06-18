@@ -1,0 +1,1344 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>docs — matchstick</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&amp;display=swap"
+    />
+    <link rel="stylesheet" href="/matchstick/static/tux.css" />
+    <link rel="stylesheet" href="/matchstick/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <a href="/matchstick/">matchstick</a>
+      <nav>
+        <a href="/matchstick/">home</a>
+        <a href="/matchstick/docs/">docs</a>
+        <a href="/matchstick/playground/">playground</a>
+        <a href="https://github.com/elee1766/matchstick" target="_blank"
+          >github</a
+        >
+        <button id="theme-toggle" data-variant="ghost">theme</button>
+      </nav>
+    </header>
+    <main>
+      <div class="docs-layout">
+        <nav class="docs-toc">
+          <span class="toc-heading">concepts</span>
+          <a class="toc-1" href="#how-it-works">how it works</a>
+          <a class="toc-1" href="#example">full example</a>
+          <a class="toc-1" href="#zones">zones</a>
+          <a class="toc-1" href="#hosts">hosts</a>
+          <a class="toc-1" href="#services">services</a>
+          <a class="toc-1" href="#policies">policies</a>
+          <a class="toc-1" href="#rules">rules</a>
+          <span class="toc-heading">nat</span>
+          <a class="toc-1" href="#nat">overview</a>
+          <a class="toc-2" href="#dnat">dnat</a>
+          <a class="toc-2" href="#snat">snat</a>
+          <a class="toc-2" href="#redirect">redirect</a>
+          <a class="toc-2" href="#nat-example">nat example</a>
+          <span class="toc-heading">features</span>
+          <a class="toc-1" href="#ip-lists">ip lists</a>
+          <a class="toc-1" href="#packet-hygiene">packet hygiene</a>
+          <a class="toc-1" href="#mss-clamping">mss clamping</a>
+          <a class="toc-1" href="#dhcp">dhcp</a>
+          <a class="toc-1" href="#docker">docker</a>
+          <a class="toc-1" href="#sysctl">sysctl</a>
+          <a class="toc-1" href="#hooks">hooks</a>
+          <a class="toc-1" href="#includes">includes</a>
+          <a class="toc-1" href="#rate-limiting">rate limiting</a>
+          <span class="toc-heading">advanced</span>
+          <a class="toc-1" href="#custom-chains">custom chains</a>
+          <a class="toc-1" href="#raw-nftables">raw nftables</a>
+          <a class="toc-1" href="#global-config">global config</a>
+          <span class="toc-heading">reference</span>
+          <a class="toc-1" href="#cli">cli</a>
+        </nav>
+        <div class="docs-content">
+          <h1>documentation</h1>
+          <h2 id="how-it-works">how it works</h2>
+          <p>
+            matchstick compiles a lua configuration file into nftables rules.
+            describe your network in terms of zones, hosts, services, policies,
+            and rules. matchstick builds the nftables chains, sets, and verdict
+            maps automatically.
+          </p>
+          <pre><code>firewall.lua  →  lua vm  →  validate  →  nftables ir  →  text or json</code></pre>
+          <p>
+            at apply time, matchstick also derives and sets kernel sysctl
+            parameters (ip forwarding, arp hardening, etc.) based on your
+            config.
+          </p>
+          <h2 id="example">full example</h2>
+          <p>a complete config and the generated nftables output:</p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local ssh  = fw:service(&quot;ssh&quot;, &quot;tcp&quot;, 22)
+local ping = fw:service(&quot;ping&quot;, &quot;icmp&quot;, &quot;echo-request&quot;)
+
+local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+
+fw:policy(wan, self, &quot;drop&quot;, { log = true })
+fw:policy(self, wan, &quot;accept&quot;)
+fw:policy(lan, self, &quot;accept&quot;)
+fw:policy(lan, wan, &quot;accept&quot;)
+
+fw:rule(wan, self, &quot;accept&quot;, ssh)
+fw:rule(wan, self, &quot;accept&quot;, ping)
+fw:rule(lan, self, &quot;accept&quot;, { proto = &quot;tcp&quot;, port = {80, 443} })
+</code></pre>
+            </section>
+            <section>
+              <header>nftables output</header>
+              <pre><code>table inet matchstick
+delete table inet matchstick
+
+table inet matchstick {
+
+    set _lograte_4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    set _lograte_6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    map input_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump wan_to_fw,
+            &quot;eth1&quot; : jump lan_to_fw
+        }
+    }
+
+    map output_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump fw_to_wan
+        }
+    }
+
+    map forward_zones {
+        type ifname . ifname : verdict
+        elements = {
+            eth1 . eth0 : jump lan_to_wan
+        }
+    }
+
+    chain icmp_v4 {
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10&#x2F;second burst 5 packets accept
+    }
+
+    chain icmp_v6 {
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10&#x2F;second burst 5 packets accept
+        drop
+    }
+
+    chain rpfilter {
+        type filter hook prerouting priority filter + 5; policy accept;
+        fib saddr . mark . iif oif 0 drop
+    }
+
+    chain anti_smurf {
+        fib saddr type broadcast drop
+        fib saddr type multicast drop
+    }
+
+    chain input {
+        type filter hook input priority filter + 5; policy drop;
+        iif lo accept
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        jump icmp_v4
+        jump icmp_v6
+        iifname vmap @input_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        drop
+    }
+
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment &quot;tcp-strict: null flags&quot;
+        tcp flags &amp; (fin|syn) fin|syn drop comment &quot;tcp-strict: fin+syn&quot;
+        tcp flags &amp; (syn|rst) syn|rst drop comment &quot;tcp-strict: syn+rst&quot;
+        tcp flags &amp; (fin|psh|urg) fin|psh|urg drop comment &quot;tcp-strict: xmas&quot;
+        tcp flags &amp; (fin|syn|rst|ack) != syn ct state new drop comment &quot;tcp-strict: new non-syn&quot;
+    }
+
+    chain forward {
+        type filter hook forward priority filter + 5; policy drop;
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        fib daddr type broadcast drop
+        fib daddr type multicast drop
+        iifname . oifname vmap @forward_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick forward DROP &quot;
+        drop
+    }
+
+    chain output {
+        type filter hook output priority filter + 5; policy accept;
+        oifname vmap @output_zones
+    }
+
+    chain fw_to_wan {
+        accept
+    }
+
+    chain lan_to_fw {
+        tcp dport { 80, 443 } accept
+        accept
+    }
+
+    chain lan_to_wan {
+        accept
+    }
+
+    chain wan_to_fw {
+        meta nfproto vmap { ipv4 : jump wan_to_fw_4, ipv6 : jump wan_to_fw_6 }
+    }
+
+    chain wan_to_fw_4 {
+        tcp dport 22 accept
+        icmp type echo-request accept
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick wan_to_fw drop &quot;
+        drop
+    }
+
+    chain wan_to_fw_6 {
+        tcp dport 22 accept
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick wan_to_fw drop &quot;
+        drop
+    }
+}
+
+</code></pre>
+            </section>
+          </div>
+          <h2 id="zones">zones</h2>
+          <p>
+            a zone is a group of network interfaces that share the same trust
+            level. every config needs exactly one zone with no interfaces — the
+            firewall host itself.
+          </p>
+          <pre><code>local self = fw:zone(&quot;fw&quot;)              -- the firewall machine (no interface)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)     -- internet-facing
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)     -- trusted lan
+local dmz  = fw:zone(&quot;dmz&quot;, &quot;eth2&quot;)     -- servers
+
+-- multiple interfaces
+local internal = fw:zone(&quot;internal&quot;, {&quot;eth1&quot;, &quot;eth2&quot;})
+
+-- bridge zone
+local dock = fw:zone(&quot;dock&quot;, &quot;docker0&quot;, { bridge = true })</code></pre>
+          <h2 id="hosts">hosts</h2>
+          <p>
+            a host is a specific ip address within a zone. use hosts when you
+            need per-machine rules.
+          </p>
+          <pre><code>local server = fw:host(&quot;server&quot;, { zone = lan, addr = &quot;10.0.0.10&quot; })
+local admin  = fw:host(&quot;admin&quot;,  { zone = lan, addr = &quot;10.0.0.50&quot; })
+
+fw:rule(admin, self, &quot;accept&quot;, ssh)   -- only admin gets ssh
+fw:rule(server, dmz, &quot;accept&quot;, http)  -- server can reach dmz</code></pre>
+          <h2 id="services">services</h2>
+          <p>
+            a named protocol + port combination. define once, reuse everywhere.
+          </p>
+          <pre><code>local ssh  = fw:service(&quot;ssh&quot;, &quot;tcp&quot;, 22)
+local dns  = fw:service(&quot;dns&quot;, {&quot;tcp&quot;, &quot;udp&quot;}, 53)       -- multi-protocol
+local mosh = fw:service(&quot;mosh&quot;, &quot;udp&quot;, &quot;60000-61000&quot;)    -- port range
+local ping = fw:service(&quot;ping&quot;, &quot;icmp&quot;, &quot;echo-request&quot;)  -- icmp type
+
+-- complex: multiple protocol&#x2F;port pairs
+local plex = fw:service(&quot;plex&quot;, {
+  {&quot;tcp&quot;, 32400},
+  {&quot;udp&quot;, 1900},
+  {&quot;udp&quot;, &quot;32410-32414&quot;},
+})</code></pre>
+          <h2 id="policies">policies</h2>
+          <p>
+            the default action for traffic between two zones. applies to all
+            traffic that doesn&#x27;t match a more specific rule.
+          </p>
+          <pre><code>fw:policy(wan, self, &quot;drop&quot;, { log = true })  -- drop incoming, log it
+fw:policy(self, wan, &quot;accept&quot;)                -- allow outgoing
+fw:policy(lan, wan, &quot;accept&quot;)                 -- lan can reach internet
+fw:policy(&quot;*&quot;, &quot;*&quot;, &quot;reject&quot;)                 -- default for everything else</code></pre>
+          <p>
+            actions: &quot;accept&quot;, &quot;drop&quot;, &quot;reject&quot;.
+            reject sends icmp admin-prohibited. drop silently discards.
+          </p>
+          <h2 id="rules">rules</h2>
+          <p>
+            allow or deny specific traffic. evaluated before the zone-pair
+            policy.
+          </p>
+          <pre><code>fw:rule(wan, self, &quot;accept&quot;, ssh)
+fw:rule(wan, self, &quot;accept&quot;, { proto = &quot;tcp&quot;, port = {80, 443} })
+fw:rule(wan, self, &quot;accept&quot;, { proto = &quot;udp&quot;, port = &quot;10000-10100&quot; })
+
+-- rate-limited
+fw:rule(wan, self, &quot;accept&quot;, {
+  service = ssh,
+  rate = util:rate(&quot;5&#x2F;minute&quot;, { burst = 10 }),
+})
+
+-- connection limit
+fw:rule(wan, self, &quot;accept&quot;, { service = ssh, connlimit = 10 })
+
+-- mac address filter
+fw:rule(lan, self, &quot;accept&quot;, { service = ssh, mac = &quot;aa:bb:cc:dd:ee:ff&quot; })
+
+-- ip list matching (source and destination)
+fw:rule(wan, self, &quot;drop&quot;, { saddr_list = &quot;blocklist&quot; })
+fw:rule(lan, wan, &quot;accept&quot;, { daddr_list = &quot;allowed_hosts&quot; })
+
+-- bare rule (match all traffic)
+fw:rule(guest, self, &quot;drop&quot;)</code></pre>
+          <h2 id="nat">nat</h2>
+          <h3 id="dnat">dnat (port forwarding)</h3>
+          <pre><code>fw:dnat({ iface = wan, service = http, dest = webserver })
+fw:rule(wan, webserver, &quot;accept&quot;, http)  -- need a forward rule too
+
+-- port remap
+fw:dnat({ iface = wan, proto = &quot;tcp&quot;, port = 2222, dest = server, dest_port = 22 })
+
+-- hairpin nat
+fw:dnat({ iface = lan, daddr = &quot;203.0.113.1&quot;, proto = &quot;tcp&quot;, port = {80, 443}, dest = webserver })</code></pre>
+          <h3 id="snat">snat &#x2F; masquerade</h3>
+          <pre><code>fw:snat({ from = &quot;10.0.0.0&#x2F;8&quot;, oif = &quot;eth0&quot;, masquerade = true })
+fw:snat({ from = &quot;10.0.0.0&#x2F;8&quot;, oif = &quot;eth0&quot;, addr = &quot;203.0.113.1&quot; })</code></pre>
+          <h3 id="redirect">redirect</h3>
+          <pre><code>fw:redirect({ iface = lan, proto = &quot;tcp&quot;, port = {80}, dest_port = 3128 })</code></pre>
+          <h3 id="nat-example">nat example</h3>
+          <p>
+            a complete nat config with dnat + snat and the generated output:
+          </p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local http = fw:service(&quot;http&quot;, &quot;tcp&quot;, 80)
+
+local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+local dmz  = fw:zone(&quot;dmz&quot;, &quot;eth2&quot;)
+
+local webserver = fw:host(&quot;webserver&quot;, { zone = dmz, addr = &quot;172.16.0.10&quot; })
+
+fw:policy(wan, self, &quot;drop&quot;)
+fw:policy(self, wan, &quot;accept&quot;)
+fw:policy(lan, wan, &quot;accept&quot;)
+fw:policy(wan, dmz, &quot;drop&quot;)
+
+fw:dnat({ iface = wan, service = http, dest = webserver })
+fw:rule(wan, webserver, &quot;accept&quot;, http)
+
+fw:snat({ from = &quot;10.0.0.0&#x2F;8&quot;, oif = &quot;eth0&quot;, masquerade = true })
+fw:snat({ from = &quot;172.16.0.0&#x2F;12&quot;, oif = &quot;eth0&quot;, masquerade = true })
+</code></pre>
+            </section>
+            <section>
+              <header>nftables output</header>
+              <pre><code>warning: fw:dnat to 172.16.0.10 has no &#x27;daddr&#x27; restriction — will match traffic to ANY destination address on the interface
+table inet matchstick
+delete table inet matchstick
+
+table inet matchstick {
+
+    set _lograte_4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    set _lograte_6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    map input_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump wan_to_fw
+        }
+    }
+
+    map output_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump fw_to_wan
+        }
+    }
+
+    map forward_zones {
+        type ifname . ifname : verdict
+        elements = {
+            eth1 . eth0 : jump lan_to_wan,
+            eth0 . eth2 : jump wan_to_dmz
+        }
+    }
+
+    chain icmp_v4 {
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10&#x2F;second burst 5 packets accept
+    }
+
+    chain icmp_v6 {
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10&#x2F;second burst 5 packets accept
+        drop
+    }
+
+    chain rpfilter {
+        type filter hook prerouting priority filter + 5; policy accept;
+        fib saddr . mark . iif oif 0 drop
+    }
+
+    chain anti_smurf {
+        fib saddr type broadcast drop
+        fib saddr type multicast drop
+    }
+
+    chain input {
+        type filter hook input priority filter + 5; policy drop;
+        iif lo accept
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        jump icmp_v4
+        jump icmp_v6
+        iifname vmap @input_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        drop
+    }
+
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment &quot;tcp-strict: null flags&quot;
+        tcp flags &amp; (fin|syn) fin|syn drop comment &quot;tcp-strict: fin+syn&quot;
+        tcp flags &amp; (syn|rst) syn|rst drop comment &quot;tcp-strict: syn+rst&quot;
+        tcp flags &amp; (fin|psh|urg) fin|psh|urg drop comment &quot;tcp-strict: xmas&quot;
+        tcp flags &amp; (fin|syn|rst|ack) != syn ct state new drop comment &quot;tcp-strict: new non-syn&quot;
+    }
+
+    chain forward {
+        type filter hook forward priority filter + 5; policy drop;
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        fib daddr type broadcast drop
+        fib daddr type multicast drop
+        iifname . oifname vmap @forward_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick forward DROP &quot;
+        drop
+    }
+
+    chain output {
+        type filter hook output priority filter + 5; policy accept;
+        oifname vmap @output_zones
+    }
+
+    chain fw_to_wan {
+        accept
+    }
+
+    chain lan_to_wan {
+        accept
+    }
+
+    chain wan_to_dmz {
+        meta nfproto vmap { ipv4 : jump wan_to_dmz_4, ipv6 : jump wan_to_dmz_6 }
+    }
+
+    chain wan_to_dmz_4 {
+        ip daddr 172.16.0.10 tcp dport 80 accept
+        drop
+    }
+
+    chain wan_to_dmz_6 {
+        drop
+    }
+
+    chain wan_to_fw {
+        drop
+    }
+}
+
+table inet matchstick_nat
+delete table inet matchstick_nat
+
+table inet matchstick_nat {
+
+    chain prerouting {
+        type nat hook prerouting priority dstnat + 5; policy accept;
+        iifname eth0 tcp dport 80 dnat ip to 172.16.0.10
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat + 5; policy accept;
+        ip saddr 10.0.0.0&#x2F;8 oifname eth0 masquerade
+        ip saddr 172.16.0.0&#x2F;12 oifname eth0 masquerade
+    }
+}
+
+</code></pre>
+            </section>
+          </div>
+          <h2 id="ip-lists">ip lists</h2>
+          <p>
+            ip lists create nftables sets that can be referenced in rules. they
+            can be populated statically in the config, or dynamically at runtime
+            by external tools like crowdsec, fail2ban, or custom scripts using
+            <code>nft add element</code>.
+          </p>
+          <pre><code>-- dynamic set: populated externally (e.g. crowdsec, fail2ban)
+-- &quot;timeout&quot; flag means entries auto-expire
+fw:iplist(&quot;blocklist&quot;, { type = &quot;ipv4&quot;, flags = &quot;timeout&quot; })
+
+-- static set with elements baked into the ruleset
+-- &quot;interval&quot; flag allows CIDR range matching
+fw:iplist(&quot;bogons&quot;, {
+  type = &quot;ipv4&quot;, flags = &quot;interval&quot;,
+  elements = { &quot;0.0.0.0&#x2F;8&quot;, &quot;127.0.0.0&#x2F;8&quot;, &quot;169.254.0.0&#x2F;16&quot; },
+})
+
+-- set with URL (metadata for a future &quot;matchstick refresh&quot; command)
+fw:iplist(&quot;threats&quot;, { type = &quot;ipv4&quot;, flags = &quot;timeout&quot;,
+  url = &quot;https:&#x2F;&#x2F;example.com&#x2F;blocklist.txt&quot; })
+
+-- use in rules with saddr_list or daddr_list
+fw:rule(wan, self, &quot;drop&quot;, { saddr_list = &quot;blocklist&quot; })</code></pre>
+          <h2 id="packet-hygiene">packet hygiene</h2>
+          <p>
+            matchstick automatically generates packet sanity checks. these run
+            before your zone rules and catch malformed, spoofed, or invalid
+            traffic. all are enabled by default.
+          </p>
+          <ul>
+            <li>
+              <strong>rpfilter</strong> — reverse path filtering. drops packets
+              whose source address has no return route via the incoming
+              interface (anti-spoofing).
+            </li>
+            <li>
+              <strong>tcp_strict</strong> — drops packets with invalid tcp flag
+              combinations (null flags, fin+syn, syn+rst, xmas, new non-syn).
+              prevents tcp-based scanning and OS fingerprinting.
+            </li>
+            <li>
+              <strong>broadcast_drop</strong> — drops broadcast and multicast
+              packets in the forward chain. prevents smurf amplification
+              attacks.
+            </li>
+          </ul>
+          <pre><code>fw:laundry({
+  rpfilter       = true,   -- reverse path filtering
+  tcp_strict     = true,   -- drop malformed tcp flags
+  broadcast_drop = true,   -- drop broadcast&#x2F;multicast in forward
+})</code></pre>
+          <p>
+            sometimes legitimate traffic gets caught by these checks. for
+            example, ipvs load-balanced traffic may be marked invalid by
+            conntrack. use fw:exception() to add accept rules before the drop:
+          </p>
+          <pre><code>fw:exception(&quot;invalid&quot;, &quot;accept&quot;, https)
+fw:exception(&quot;anti_smurf&quot;, &quot;accept&quot;, { proto = &quot;udp&quot;, port = {67, 68} })
+fw:exception(&quot;rpfilter&quot;, &quot;accept&quot;, { proto = &quot;udp&quot;, port = 68 })</code></pre>
+          <p>here is what the generated packet hygiene chains look like:</p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local https = fw:service(&quot;https&quot;, {&quot;tcp&quot;, &quot;udp&quot;}, 443)
+
+fw:policy(wan, self, &quot;drop&quot;)
+
+fw:laundry({
+  rpfilter       = true,
+  tcp_strict     = true,
+  broadcast_drop = true,
+})
+
+fw:exception(&quot;invalid&quot;, &quot;accept&quot;, https)
+fw:exception(&quot;anti_smurf&quot;, &quot;accept&quot;, { proto = &quot;udp&quot;, port = {67, 68} })
+</code></pre>
+            </section>
+            <section>
+              <header>nftables output</header>
+              <pre><code>table inet matchstick
+delete table inet matchstick
+
+table inet matchstick {
+
+    set _lograte_4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    set _lograte_6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    map input_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump wan_to_fw
+        }
+    }
+
+    map output_zones {
+        type ifname : verdict
+    }
+
+    map forward_zones {
+        type ifname . ifname : verdict
+    }
+
+    chain icmp_v4 {
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10&#x2F;second burst 5 packets accept
+    }
+
+    chain icmp_v6 {
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10&#x2F;second burst 5 packets accept
+        drop
+    }
+
+    chain rpfilter {
+        type filter hook prerouting priority filter + 5; policy accept;
+        fib saddr . mark . iif oif 0 drop
+    }
+
+    chain anti_smurf {
+        udp dport { 67, 68 } accept
+        fib saddr type broadcast drop
+        fib saddr type multicast drop
+    }
+
+    chain invalid {
+        tcp dport 443 accept
+        udp dport 443 accept
+        drop
+    }
+
+    chain input {
+        type filter hook input priority filter + 5; policy drop;
+        iif lo accept
+        ct state { established, related } accept
+        ct state invalid jump invalid
+        jump anti_smurf
+        jump tcp_strict
+        jump icmp_v4
+        jump icmp_v6
+        iifname vmap @input_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        drop
+    }
+
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment &quot;tcp-strict: null flags&quot;
+        tcp flags &amp; (fin|syn) fin|syn drop comment &quot;tcp-strict: fin+syn&quot;
+        tcp flags &amp; (syn|rst) syn|rst drop comment &quot;tcp-strict: syn+rst&quot;
+        tcp flags &amp; (fin|psh|urg) fin|psh|urg drop comment &quot;tcp-strict: xmas&quot;
+        tcp flags &amp; (fin|syn|rst|ack) != syn ct state new drop comment &quot;tcp-strict: new non-syn&quot;
+    }
+
+    chain forward {
+        type filter hook forward priority filter + 5; policy drop;
+        ct state { established, related } accept
+        ct state invalid jump invalid
+        jump anti_smurf
+        jump tcp_strict
+        fib daddr type broadcast drop
+        fib daddr type multicast drop
+        iifname . oifname vmap @forward_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick forward DROP &quot;
+        drop
+    }
+
+    chain output {
+        type filter hook output priority filter + 5; policy accept;
+        oifname vmap @output_zones
+    }
+
+    chain wan_to_fw {
+        drop
+    }
+}
+
+</code></pre>
+            </section>
+          </div>
+          <h2 id="mss-clamping">mss clamping</h2>
+          <p>
+            mss clamping is needed when your network path has a reduced mtu —
+            common with pppoe, vpn tunnels, and wireguard. without it, tcp
+            connections may hang or stall because packets exceed the path mtu
+            and get silently dropped.
+          </p>
+          <p>
+            matchstick creates a separate chain at mangle priority that rewrites
+            the tcp mss field in syn packets to match the route mtu (pmtud).
+          </p>
+          <pre><code>fw:mss_clamp(&quot;forward&quot;)    -- most common: clamp forwarded traffic
+fw:mss_clamp(&quot;output&quot;)     -- also clamp locally generated traffic
+fw:mss_clamp(&quot;postrouting&quot;) -- clamp at postrouting</code></pre>
+          <h2 id="dhcp">dhcp</h2>
+          <p>
+            dhcp needs special handling because it uses broadcast udp on ports
+            67&#x2F;68, which would normally be dropped by the firewall.
+            fw:dhcp() adds rules to the input chain to allow dhcp traffic on the
+            specified zone&#x27;s interfaces.
+          </p>
+          <ul>
+            <li>
+              <code>&quot;client&quot;</code> — this machine gets its ip via
+              dhcp on this zone (allows udp 67→68 inbound)
+            </li>
+            <li>
+              <code>&quot;server&quot;</code> — this machine serves dhcp on this
+              zone (allows udp 68→67 inbound, and the corresponding outbound)
+            </li>
+          </ul>
+          <pre><code>fw:dhcp(wan, &quot;client&quot;)   -- get ip from upstream
+fw:dhcp(lan, &quot;server&quot;)  -- serve ip to lan clients</code></pre>
+          <h2 id="docker">docker</h2>
+          <p>
+            docker creates its own bridge networks (docker0, br-*) and by
+            default manages iptables rules that bypass your firewall entirely.
+            this is a well-known security problem with ufw and other firewalls.
+          </p>
+          <p>
+            matchstick handles docker by treating bridge interfaces as zones.
+            you define the docker bridge as a zone and write explicit policies
+            and rules for container traffic, just like any other zone.
+            matchstick&#x27;s forward chain controls all forwarded traffic,
+            including docker.
+          </p>
+          <pre><code>-- declare docker bridges (br-+ matches all br-* bridges)
+fw:docker({ bridges = {&quot;docker0&quot;, &quot;br-+&quot;} })
+
+-- then treat &quot;dock&quot; zone like any other
+fw:policy(dock, self, &quot;reject&quot;)   -- containers can&#x27;t reach firewall
+fw:policy(dock, wan, &quot;accept&quot;)    -- containers can reach internet
+fw:rule(dock, self, &quot;accept&quot;, dns)  -- except dns</code></pre>
+          <p>full example with dhcp and docker:</p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+local dock = fw:zone(&quot;dock&quot;, &quot;docker0&quot;)
+local dns  = fw:service(&quot;dns&quot;, {&quot;tcp&quot;, &quot;udp&quot;}, 53)
+
+fw:policy(wan, self, &quot;drop&quot;)
+fw:policy(self, wan, &quot;accept&quot;)
+fw:policy(lan, self, &quot;accept&quot;)
+fw:policy(dock, self, &quot;reject&quot;)
+fw:policy(dock, wan, &quot;accept&quot;)
+
+fw:dhcp(wan, &quot;client&quot;)
+fw:dhcp(lan, &quot;server&quot;)
+
+fw:docker({ bridges = {&quot;docker0&quot;, &quot;br-+&quot;} })
+
+fw:rule(dock, self, &quot;accept&quot;, dns)
+
+fw:snat({ from = &quot;172.17.0.0&#x2F;12&quot;, oif = &quot;eth0&quot;, masquerade = true })
+</code></pre>
+            </section>
+            <section>
+              <header>nftables output</header>
+              <pre><code>table inet matchstick
+delete table inet matchstick
+
+table inet matchstick {
+
+    set _lograte_4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    set _lograte_6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    map input_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump wan_to_fw,
+            &quot;eth1&quot; : jump lan_to_fw,
+            &quot;docker0&quot; : jump dock_to_fw
+        }
+    }
+
+    map output_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump fw_to_wan
+        }
+    }
+
+    map forward_zones {
+        type ifname . ifname : verdict
+        elements = {
+            docker0 . eth0 : jump dock_to_wan
+        }
+    }
+
+    chain icmp_v4 {
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10&#x2F;second burst 5 packets accept
+    }
+
+    chain icmp_v6 {
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10&#x2F;second burst 5 packets accept
+        drop
+    }
+
+    chain rpfilter {
+        type filter hook prerouting priority filter + 5; policy accept;
+        fib saddr . mark . iif oif 0 drop
+    }
+
+    chain anti_smurf {
+        fib saddr type broadcast drop
+        fib saddr type multicast drop
+    }
+
+    chain input {
+        type filter hook input priority filter + 5; policy drop;
+        iif lo accept
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        iifname eth0 udp sport 67 udp dport 68 accept
+        iifname eth1 udp sport 68 udp dport 67 accept
+        jump tcp_strict
+        jump icmp_v4
+        jump icmp_v6
+        iifname vmap @input_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        drop
+    }
+
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment &quot;tcp-strict: null flags&quot;
+        tcp flags &amp; (fin|syn) fin|syn drop comment &quot;tcp-strict: fin+syn&quot;
+        tcp flags &amp; (syn|rst) syn|rst drop comment &quot;tcp-strict: syn+rst&quot;
+        tcp flags &amp; (fin|psh|urg) fin|psh|urg drop comment &quot;tcp-strict: xmas&quot;
+        tcp flags &amp; (fin|syn|rst|ack) != syn ct state new drop comment &quot;tcp-strict: new non-syn&quot;
+    }
+
+    chain forward {
+        type filter hook forward priority filter + 5; policy drop;
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        fib daddr type broadcast drop
+        fib daddr type multicast drop
+        iifname . oifname vmap @forward_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick forward DROP &quot;
+        drop
+    }
+
+    chain output {
+        type filter hook output priority filter + 5; policy accept;
+        oifname eth1 udp sport 67 udp dport 68 accept
+        oifname vmap @output_zones
+    }
+
+    chain dock_to_fw {
+        tcp dport 53 accept
+        udp dport 53 accept
+        reject with icmpx admin-prohibited
+    }
+
+    chain dock_to_wan {
+        accept
+    }
+
+    chain fw_to_wan {
+        accept
+    }
+
+    chain lan_to_fw {
+        accept
+    }
+
+    chain wan_to_fw {
+        drop
+    }
+}
+
+table inet matchstick_nat
+delete table inet matchstick_nat
+
+table inet matchstick_nat {
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat + 5; policy accept;
+        ip saddr 172.16.0.0&#x2F;12 oifname eth0 masquerade
+    }
+}
+
+</code></pre>
+            </section>
+          </div>
+          <p>mss clamping and redirect example:</p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+
+fw:policy(wan, self, &quot;drop&quot;)
+fw:policy(lan, self, &quot;accept&quot;)
+fw:policy(lan, wan, &quot;accept&quot;)
+
+fw:mss_clamp(&quot;forward&quot;)
+
+fw:redirect({ iface = lan, proto = &quot;tcp&quot;, port = {80}, dest_port = 3128 })
+</code></pre>
+            </section>
+            <section>
+              <header>nftables output</header>
+              <pre><code>table inet matchstick
+delete table inet matchstick
+
+table inet matchstick {
+
+    set _lograte_4 {
+        type ipv4_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    set _lograte_6 {
+        type ipv6_addr
+        flags dynamic, timeout
+        size 65535
+        timeout 60s
+    }
+
+    map input_zones {
+        type ifname : verdict
+        elements = {
+            &quot;eth0&quot; : jump wan_to_fw,
+            &quot;eth1&quot; : jump lan_to_fw
+        }
+    }
+
+    map output_zones {
+        type ifname : verdict
+    }
+
+    map forward_zones {
+        type ifname . ifname : verdict
+        elements = {
+            eth1 . eth0 : jump lan_to_wan
+        }
+    }
+
+    chain icmp_v4 {
+        icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        icmp type echo-request limit rate 10&#x2F;second burst 5 packets accept
+    }
+
+    chain icmp_v6 {
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
+        icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+        icmpv6 type echo-request limit rate 10&#x2F;second burst 5 packets accept
+        drop
+    }
+
+    chain rpfilter {
+        type filter hook prerouting priority filter + 5; policy accept;
+        fib saddr . mark . iif oif 0 drop
+    }
+
+    chain anti_smurf {
+        fib saddr type broadcast drop
+        fib saddr type multicast drop
+    }
+
+    chain input {
+        type filter hook input priority filter + 5; policy drop;
+        iif lo accept
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        jump icmp_v4
+        jump icmp_v6
+        iifname vmap @input_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        update @_lograte_6 { ip6 saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick input DROP &quot;
+        drop
+    }
+
+    chain tcp_strict {
+        tcp flags ! fin,syn,rst,psh,ack,urg drop comment &quot;tcp-strict: null flags&quot;
+        tcp flags &amp; (fin|syn) fin|syn drop comment &quot;tcp-strict: fin+syn&quot;
+        tcp flags &amp; (syn|rst) syn|rst drop comment &quot;tcp-strict: syn+rst&quot;
+        tcp flags &amp; (fin|psh|urg) fin|psh|urg drop comment &quot;tcp-strict: xmas&quot;
+        tcp flags &amp; (fin|syn|rst|ack) != syn ct state new drop comment &quot;tcp-strict: new non-syn&quot;
+    }
+
+    chain forward {
+        type filter hook forward priority filter + 5; policy drop;
+        ct state { established, related } accept
+        ct state invalid drop
+        jump anti_smurf
+        jump tcp_strict
+        fib daddr type broadcast drop
+        fib daddr type multicast drop
+        iifname . oifname vmap @forward_zones
+        update @_lograte_4 { ip saddr limit rate 5&#x2F;minute burst 5 packets } log prefix &quot;matchstick forward DROP &quot;
+        drop
+    }
+
+    chain output {
+        type filter hook output priority filter + 5; policy accept;
+        oifname vmap @output_zones
+    }
+
+    chain lan_to_fw {
+        accept
+    }
+
+    chain lan_to_wan {
+        accept
+    }
+
+    chain wan_to_fw {
+        drop
+    }
+
+    chain mss_clamp_forward {
+        type filter hook forward priority filter - 145; policy accept;
+        tcp flags syn tcp option maxseg size set rt mtu
+    }
+}
+
+table inet matchstick_nat
+delete table inet matchstick_nat
+
+table inet matchstick_nat {
+
+    chain prerouting {
+        type nat hook prerouting priority dstnat + 5; policy accept;
+        iifname eth1 tcp dport 80 redirect to :3128
+    }
+}
+
+</code></pre>
+            </section>
+          </div>
+          <h2 id="sysctl">sysctl</h2>
+          <p>
+            matchstick automatically derives kernel sysctl settings from your
+            config. ip forwarding is enabled when forwarding rules exist. arp
+            hardening, redirect protection, and source routing protection are
+            always set.
+          </p>
+          <pre><code>fw:sysctl(&quot;net.ipv4.tcp_syncookies&quot;, &quot;1&quot;)
+
+fw:sysctl({
+  [&quot;net.netfilter.nf_conntrack_max&quot;] = &quot;262144&quot;,
+  [&quot;net.core.somaxconn&quot;] = &quot;4096&quot;,
+})
+
+-- unset a derived default (matchstick won&#x27;t touch it)
+fw:sysctl(&quot;net.ipv4.conf.all.forwarding&quot;, false)</code></pre>
+          <p>
+            example: a router config with custom sysctl and an unset override:
+          </p>
+          <div class="example-pair">
+            <section>
+              <header>firewall.lua</header>
+              <pre><code>local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+
+fw:policy(lan, wan, &quot;accept&quot;)
+
+fw:sysctl(&quot;net.ipv4.tcp_syncookies&quot;, &quot;1&quot;)
+fw:sysctl(&quot;net.ipv4.conf.all.log_martians&quot;, false)
+</code></pre>
+            </section>
+            <section>
+              <header>derived sysctls</header>
+              <pre><code>net.ipv4.conf.all.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.default.arp_announce = 2
+net.ipv4.conf.all.arp_announce = 2
+net.ipv4.conf.default.arp_ignore = 1
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.default.arp_filter = 1
+net.ipv4.conf.all.arp_filter = 1
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv4.conf.default.log_martians = 1
+net.ipv4.tcp_syncookies = 1
+</code></pre>
+            </section>
+          </div>
+          <h2 id="hooks">hooks</h2>
+          <p>
+            lifecycle hooks run shell commands before or after applying the
+            firewall. useful for running sysctl, restarting services, or sending
+            notifications.
+          </p>
+          <pre><code>fw:hook({
+  pre_start  = &quot;echo starting firewall&quot;,
+  post_start = &quot;sysctl -p &#x2F;etc&#x2F;sysctl.d&#x2F;custom.conf&quot;,
+  pre_stop   = &quot;&#x2F;usr&#x2F;local&#x2F;bin&#x2F;notify-slack stopping&quot;,
+  post_stop  = &quot;echo firewall stopped&quot;,
+})</code></pre>
+          <p>
+            hooks run with the same privileges as matchstick (typically root).
+            pre_start&#x2F;post_start run during <code>matchstick apply</code>.
+            pre_stop&#x2F;post_stop are available for init system integration.
+          </p>
+          <h2 id="includes">includes</h2>
+          <p>
+            split your config across multiple files. paths are resolved relative
+            to the current config file&#x27;s directory. circular includes are
+            detected.
+          </p>
+          <pre><code>-- main firewall.lua
+fw:include(&quot;services.lua&quot;)    -- service definitions
+fw:include(&quot;zones.lua&quot;)       -- zone + host definitions
+fw:include(&quot;policies.lua&quot;)    -- zone pair policies
+fw:include(&quot;rules&#x2F;wan.lua&quot;)   -- subdirectory works too
+fw:include(&quot;rules&#x2F;lan.lua&quot;)</code></pre>
+          <h2 id="rate-limiting">rate limiting</h2>
+          <p>
+            rate limiting restricts the number of new connections per time
+            period. useful for preventing brute force attacks (ssh), dos, or api
+            abuse. matchstick uses nftables dynamic sets to track per-source-ip
+            rates.
+          </p>
+          <pre><code>-- anonymous rate limit (per-rule)
+fw:rule(wan, self, &quot;accept&quot;, {
+  service = ssh,
+  rate = util:rate(&quot;5&#x2F;minute&quot;, { burst = 10 }),
+})
+
+-- named rate limit (shared across rules)
+local ssh_limit = util:rate(&quot;3&#x2F;minute&quot;, { burst = 5, name = &quot;ssh_limit&quot; })
+fw:rule(wan, self, &quot;accept&quot;, { service = ssh, rate = ssh_limit })</code></pre>
+          <p>
+            the rate format is &quot;count&#x2F;unit&quot; where unit is second,
+            minute, hour, or day. burst allows a short spike before the limit
+            kicks in.
+          </p>
+          <h2 id="custom-chains">custom chains</h2>
+          <p>
+            for advanced use cases (policy routing, packet marking, traffic
+            shaping), you can create nftables chains at arbitrary hook points
+            and priorities. rules are nftables json objects (lua tables that map
+            to the nftables json schema), ensuring both text and json output
+            work correctly.
+          </p>
+          <pre><code>-- mark traffic from eth1 for policy routing
+fw:chain(&quot;prerouting&quot;, {
+  type = &quot;filter&quot;,
+  priority = &quot;mangle&quot;,  -- or &quot;raw&quot;, &quot;filter&quot;, &quot;security&quot;, or a number
+  rules = {
+    {  -- each rule is an array of statement objects
+      { match = { op = &quot;==&quot;,
+        left = { meta = { key = &quot;iifname&quot; } },
+        right = &quot;eth1&quot; } },
+      { mangle = { key = { meta = { key = &quot;mark&quot; } }, value = 256 } },
+    },
+  },
+})</code></pre>
+          <p>
+            named priorities: raw (-300), mangle (-150), filter (0), security
+            (50), srcnat (100), dstnat (-100). all offset by your
+            priority_offset (default 5). hooks: prerouting, postrouting,
+            forward, input, output.
+          </p>
+          <h2 id="raw-nftables">raw nftables</h2>
+          <p>
+            escape hatch for anything matchstick doesn&#x27;t have a first-class
+            api for. inject raw nftables json command objects directly into the
+            ruleset. each argument is a lua table that maps to a single nftables
+            json command.
+          </p>
+          <pre><code>-- create a custom chain
+fw:raw_nft(
+  { add = { chain = {
+    family = &quot;inet&quot;, table = &quot;matchstick&quot;, name = &quot;my_chain&quot;,
+    type = &quot;filter&quot;, hook = &quot;input&quot;, prio = 200, policy = &quot;accept&quot;,
+  }}},
+  { add = { rule = {
+    family = &quot;inet&quot;, table = &quot;matchstick&quot;, chain = &quot;my_chain&quot;,
+    expr = {
+      { match = { op = &quot;==&quot;,
+        left = { payload = { protocol = &quot;tcp&quot;, field = &quot;dport&quot; } },
+        right = 12345 } },
+      { accept = {} },
+    },
+  }}}
+)</code></pre>
+          <p>
+            raw commands are passed through verbatim to json output and rendered
+            to text via a json-to-nftables converter. they appear inside the
+            matchstick table.
+          </p>
+          <h2 id="global-config">global config</h2>
+          <p>override defaults for the entire firewall:</p>
+          <pre><code>fw:config({
+  table_name      = &quot;matchstick&quot;,      -- nftables table name
+  priority_offset = 5,                 -- chain priority offset
+  family          = &quot;inet&quot;,            -- &quot;inet&quot; (dual-stack) or &quot;ip&quot; (v4 only)
+  input_policy    = &quot;drop&quot;,            -- base input chain policy
+  output_policy   = &quot;accept&quot;,          -- base output chain policy
+  log_rate        = &quot;5&#x2F;minute burst 5&quot;, -- rate limit for logging
+  log_prefix      = &quot;matchstick&quot;,       -- syslog prefix
+  log_level       = &quot;info&quot;,             -- log level
+  counter         = false,              -- add counters to all rules
+  log_set_size    = 65535,              -- max entries in rate limit sets
+  log_set_timeout = 60,                -- rate limit entry timeout (seconds)
+})</code></pre>
+          <p>
+            the priority_offset shifts all matchstick chains relative to the
+            standard nftables priorities. default 5 means matchstick&#x27;s
+            filter chains run at priority filter+5, which avoids conflicts with
+            other nftables rulesets. set to 0 to use standard priorities, or
+            higher to run after other tools.
+          </p>
+          <h2 id="cli">cli</h2>
+          <table>
+            <tbody>
+              <tr>
+                <td><code>matchstick check config.lua</code></td>
+                <td>validate</td>
+              </tr>
+              <tr>
+                <td><code>matchstick render config.lua</code></td>
+                <td>print nftables (text or --json)</td>
+              </tr>
+              <tr>
+                <td><code>matchstick apply config.lua</code></td>
+                <td>apply to kernel (--no-sysctl to skip)</td>
+              </tr>
+              <tr>
+                <td><code>matchstick diff config.lua</code></td>
+                <td>diff running vs generated</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>matchstick show matrix|topology|sysctl|json</code>
+                </td>
+                <td>visualize config</td>
+              </tr>
+              <tr>
+                <td><code>matchstick import-ufw</code></td>
+                <td>convert ufw rules (pipe from stdin)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+    <footer>
+      <p>matchstick — lua-based nftables firewall configuration</p>
+    </footer>
+    <script>
+      function getTheme() {
+        return localStorage.getItem("theme") || "auto";
+      }
+      function applyTheme(t) {
+        if (t === "auto")
+          document.documentElement.removeAttribute("data-theme");
+        else document.documentElement.setAttribute("data-theme", t);
+      }
+      function cycleTheme() {
+        var order = ["auto", "light", "dark"];
+        var cur = order.indexOf(getTheme());
+        var next = order[(cur + 1) % 3];
+        localStorage.setItem("theme", next);
+        applyTheme(next);
+        document.getElementById("theme-toggle").textContent =
+          next === "auto" ? "theme" : next;
+      }
+      (function () {
+        var t = getTheme();
+        applyTheme(t);
+        var el = document.getElementById("theme-toggle");
+        if (el) {
+          if (t !== "auto") el.textContent = t;
+          el.addEventListener("click", cycleTheme);
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,2 +1,3 @@
 -- Included by include_main.lua
-ssh = fw:service("ssh", "tcp", 22)
+local ssh = fw:service("ssh", "tcp", 22)
+return { ssh = ssh }

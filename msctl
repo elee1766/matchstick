@@ -1,0 +1,135 @@
+#!/bin/sh
+# msctl — operator wrapper for matchstick firewall management.
+# Combines matchstick (the compiler) with nft (the runtime) for
+# day-to-day firewall operations.
+#
+# Install alongside matchstick:
+#   install -m 755 contrib/msctl /usr/local/bin/msctl
+
+set -e
+
+MATCHSTICK="${MATCHSTICK:-matchstick}"
+NFT="${NFT:-nft}"
+CONFIG="${MATCHSTICK_CONFIG:-/etc/matchstick/firewall.lua}"
+TABLE="${MATCHSTICK_TABLE:-matchstick}"
+FAMILY="${MATCHSTICK_FAMILY:-inet}"
+
+usage() {
+    cat >&2 <<EOF
+msctl — matchstick firewall control
+
+Commands:
+  status              Show running rules
+  diff                Diff running rules vs config
+  check               Validate config
+  apply               Apply config to kernel
+  reload              Same as apply
+  flush               Remove all matchstick rules
+  edit                Edit config, validate, and apply
+  render              Print what would be applied
+  version             Show matchstick version
+
+Environment:
+  MATCHSTICK_CONFIG   Config file (default: $CONFIG)
+  MATCHSTICK_TABLE    Table name (default: $TABLE)
+  EDITOR              Editor for 'edit' command (default: vi)
+EOF
+    exit 1
+}
+
+require_nft() {
+    if ! command -v "$NFT" >/dev/null 2>&1; then
+        echo "error: nft not found. Install nftables." >&2
+        exit 1
+    fi
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "error: must be root" >&2
+        exit 1
+    fi
+}
+
+require_config() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "error: config not found: $CONFIG" >&2
+        exit 1
+    fi
+}
+
+cmd_status() {
+    require_nft
+    # Show both filter and NAT tables if they exist
+    $NFT list table "$FAMILY" "$TABLE" 2>/dev/null || true
+    $NFT list table "$FAMILY" "${TABLE}_nat" 2>/dev/null || true
+    # If neither exists, say so
+    if ! $NFT list table "$FAMILY" "$TABLE" >/dev/null 2>&1; then
+        echo "no matchstick rules loaded (table $FAMILY $TABLE not found)"
+    fi
+}
+
+cmd_diff() {
+    require_nft
+    require_config
+    {
+        $NFT list table "$FAMILY" "$TABLE" 2>/dev/null || true
+        $NFT list table "$FAMILY" "${TABLE}_nat" 2>/dev/null || true
+    } | "$MATCHSTICK" diff "$CONFIG" -
+}
+
+cmd_check() {
+    require_config
+    "$MATCHSTICK" check "$CONFIG"
+}
+
+cmd_apply() {
+    require_root
+    require_config
+    "$MATCHSTICK" apply "$CONFIG"
+}
+
+cmd_flush() {
+    require_root
+    require_nft
+    printf 'delete table %s %s\ndelete table %s %s\n' \
+        "$FAMILY" "$TABLE" "$FAMILY" "${TABLE}_nat" \
+        | $NFT -f - 2>/dev/null || true
+    echo "flushed $FAMILY $TABLE"
+}
+
+cmd_edit() {
+    require_root
+    require_config
+    local editor="${EDITOR:-vi}"
+    local tmp
+    tmp=$(mktemp "${CONFIG}.edit.XXXXXX")
+    cp "$CONFIG" "$tmp"
+    if $editor "$tmp" && "$MATCHSTICK" check "$tmp"; then
+        cp "$tmp" "$CONFIG"
+        rm -f "$tmp"
+        "$MATCHSTICK" apply "$CONFIG"
+    else
+        echo "config unchanged (validation failed or editor exited with error)" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+}
+
+cmd_render() {
+    require_config
+    "$MATCHSTICK" render "$CONFIG"
+}
+
+case "${1:-}" in
+    status)     cmd_status ;;
+    diff)       cmd_diff ;;
+    check)      cmd_check ;;
+    apply)      cmd_apply ;;
+    reload)     cmd_apply ;;
+    flush)      cmd_flush ;;
+    edit)       cmd_edit ;;
+    render)     cmd_render ;;
+    version)    "$MATCHSTICK" version ;;
+    *)          usage ;;
+esac

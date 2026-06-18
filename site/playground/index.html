@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>playground — matchstick</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&amp;display=swap"
+    />
+    <link rel="stylesheet" href="/matchstick/static/tux.css" />
+    <link rel="stylesheet" href="/matchstick/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <a href="/matchstick/">matchstick</a>
+      <nav>
+        <a href="/matchstick/">home</a>
+        <a href="/matchstick/docs/">docs</a>
+        <a href="/matchstick/playground/">playground</a>
+        <a href="https://github.com/elee1766/matchstick" target="_blank"
+          >github</a
+        >
+        <button id="theme-toggle" data-variant="ghost">theme</button>
+      </nav>
+    </header>
+    <main>
+      <div>
+        <div class="pg-toolbar">
+          <div class="pg-actions">
+            <select id="output-format">
+              <option value="text" selected="selected">nftables text</option>
+              <option value="json">nftables json</option>
+              <option value="sysctl">sysctl</option>
+            </select>
+            <span id="engine-badge" class="pg-badge">loading wasm...</span>
+          </div>
+        </div>
+        <div class="pg-grid">
+          <section>
+            <header>firewall.lua</header>
+            <textarea
+              id="config-input"
+              rows="28"
+              spellcheck="false"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+            >
+local ssh  = fw:service(&quot;ssh&quot;, &quot;tcp&quot;, 22)
+local http = fw:service(&quot;http&quot;, &quot;tcp&quot;, 80)
+local ping = fw:service(&quot;ping&quot;, &quot;icmp&quot;, &quot;echo-request&quot;)
+
+local self = fw:zone(&quot;fw&quot;)
+local wan  = fw:zone(&quot;wan&quot;, &quot;eth0&quot;)
+local lan  = fw:zone(&quot;lan&quot;, &quot;eth1&quot;)
+
+fw:policy(wan, self, &quot;drop&quot;, { log = true })
+fw:policy(self, wan, &quot;accept&quot;)
+fw:policy(lan, self, &quot;accept&quot;)
+fw:policy(lan, wan, &quot;accept&quot;)
+
+fw:rule(wan, self, &quot;accept&quot;, ssh)
+fw:rule(wan, self, &quot;accept&quot;, http)
+fw:rule(wan, self, &quot;accept&quot;, ping)
+</textarea
+            >
+          </section>
+          <section>
+            <header><span id="check-status">output</span></header>
+            <pre
+              id="output"
+              class="pg-output"
+            ><code id="output-code"></code></pre>
+          </section>
+        </div>
+        <script>
+          var engine = null;
+          var renderTimer = null;
+          var lastConfig = "";
+          var lastFormat = "";
+
+          function doRender() {
+            var config = document.getElementById("config-input").value;
+            var format = document.getElementById("output-format").value;
+            if (config === lastConfig && format === lastFormat) return;
+            lastConfig = config;
+            lastFormat = format;
+            var status = document.getElementById("check-status");
+            var out = document.getElementById("output-code");
+            if (!engine) {
+              status.textContent = "loading...";
+              return;
+            }
+            try {
+              var data = JSON.parse(
+                engine.ccall(
+                  "loadAndRender",
+                  "string",
+                  ["string", "string"],
+                  [config, format],
+                ),
+              );
+              if (data.error) {
+                status.textContent = "error";
+                out.textContent = data.error;
+              } else {
+                status.textContent = format;
+                out.textContent = data.output;
+              }
+            } catch (e) {
+              status.textContent = "error";
+              out.textContent = e.message;
+            }
+          }
+
+          document
+            .getElementById("config-input")
+            .addEventListener("input", function () {
+              clearTimeout(renderTimer);
+              renderTimer = setTimeout(doRender, 300);
+            });
+
+          document
+            .getElementById("output-format")
+            .addEventListener("change", function () {
+              lastFormat = "";
+              doRender();
+            });
+
+          var s = document.createElement("script");
+          s.src = "/matchstick/static/playground.js";
+          s.onload = function () {
+            createMatchstick()
+              .then(function (mod) {
+                engine = mod;
+                document.getElementById("engine-badge").textContent = "wasm";
+                doRender();
+              })
+              .catch(function (e) {
+                document.getElementById("engine-badge").textContent = "failed";
+                document.getElementById("output-code").textContent =
+                  "failed to load wasm: " + e.message;
+              });
+          };
+          s.onerror = function () {
+            document.getElementById("engine-badge").textContent = "no wasm";
+            document.getElementById("output-code").textContent =
+              "playground.js not found — build with: nimble wasm";
+          };
+          document.body.appendChild(s);
+        </script>
+      </div>
+    </main>
+    <footer>
+      <p>matchstick — lua-based nftables firewall configuration</p>
+    </footer>
+    <script>
+      function getTheme() {
+        return localStorage.getItem("theme") || "auto";
+      }
+      function applyTheme(t) {
+        if (t === "auto")
+          document.documentElement.removeAttribute("data-theme");
+        else document.documentElement.setAttribute("data-theme", t);
+      }
+      function cycleTheme() {
+        var order = ["auto", "light", "dark"];
+        var cur = order.indexOf(getTheme());
+        var next = order[(cur + 1) % 3];
+        localStorage.setItem("theme", next);
+        applyTheme(next);
+        document.getElementById("theme-toggle").textContent =
+          next === "auto" ? "theme" : next;
+      }
+      (function () {
+        var t = getTheme();
+        applyTheme(t);
+        var el = document.getElementById("theme-toggle");
+        if (el) {
+          if (t !== "auto") el.textContent = t;
+          el.addEventListener("click", cycleTheme);
+        }
+      })();
+    </script>
+  </body>
+</html>

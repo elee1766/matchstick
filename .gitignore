@@ -2,9 +2,8 @@
 /matchstick
 /src/matchstick
 /dist/
-/web/ssg
-/web/static/playground.js
-/web/static/playground.wasm
+/site/static/playground.js
+/site/static/playground.wasm
 nimcache/
 nimblecache/
 

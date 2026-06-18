@@ -1,0 +1,127 @@
+# matchstick
+
+> Lua-based nftables firewall configuration tool
+
+matchstick compiles Lua config files into native nftables rulesets. It replaces tools like UFW, Shorewall, and firewalld with a single version-controllable Lua file.
+
+## Core Concepts
+
+- **Zones**: groups of network interfaces (wan, lan, dmz). One zone with no interfaces is the firewall host itself.
+- **Hosts**: specific IP addresses within a zone for per-machine rules.
+- **Services**: named protocol+port combinations (reusable across rules).
+- **Policies**: default action between zone pairs (accept/drop/reject).
+- **Rules**: specific traffic matches evaluated before the policy.
+
+## Lua API
+
+### Zones & Hosts
+```lua
+local self = fw:zone("fw")
+local wan = fw:zone("wan", "eth0")
+local lan = fw:zone("lan", {"eth1", "eth2"})
+local server = fw:host("server", { zone = lan, addr = "10.0.0.10" })
+```
+
+### Services
+```lua
+local ssh = fw:service("ssh", "tcp", 22)
+local dns = fw:service("dns", {"tcp", "udp"}, 53)
+local ping = fw:service("ping", "icmp", "echo-request")
+local plex = fw:service("plex", {{"tcp", 32400}, {"udp", 1900}})
+```
+
+### Policies & Rules
+```lua
+fw:policy(wan, self, "drop", { log = true })
+fw:policy(self, wan, "accept")
+fw:policy("*", "*", "reject")
+
+fw:rule(wan, self, "accept", ssh)
+fw:rule(wan, self, "accept", { proto = "tcp", port = {80, 443} })
+fw:rule(wan, self, "accept", { service = ssh, rate = util:rate("5/minute", { burst = 10 }), connlimit = 10 })
+fw:rule(lan, self, "accept", { service = ssh, mac = "aa:bb:cc:dd:ee:ff" })
+fw:rule(wan, self, "drop", { saddr_list = "blocklist" })
+```
+
+### NAT
+```lua
+fw:dnat({ iface = wan, service = http, dest = webserver })
+fw:dnat({ iface = wan, proto = "tcp", port = 2222, dest = server, dest_port = 22 })
+fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
+fw:snat({ from = "10.0.0.0/8", oif = "eth0", addr = "203.0.113.1" })
+fw:redirect({ iface = lan, proto = "tcp", port = {80}, dest_port = 3128 })
+```
+
+### IP Lists
+```lua
+fw:iplist("blocklist", { type = "ipv4", flags = "timeout" })
+fw:iplist("bogons", { type = "ipv4", flags = "interval", elements = {"0.0.0.0/8", "127.0.0.0/8"} })
+```
+
+### Packet Hygiene
+```lua
+fw:laundry({ rpfilter = true, tcp_strict = true, broadcast_drop = true })
+fw:exception("invalid", "accept", https)
+fw:exception("anti_smurf", "accept", { proto = "udp", port = {67, 68} })
+```
+
+### Other Features
+```lua
+fw:dhcp(wan, "client")
+fw:dhcp(lan, "server")
+fw:mss_clamp("forward")
+fw:docker({ bridges = {"docker0", "br-+"} })
+fw:sysctl("net.ipv4.tcp_syncookies", "1")
+fw:sysctl("net.ipv4.conf.all.forwarding", false)  -- unset derived default
+fw:hook({ post_start = "echo applied" })
+fw:include("services.lua")
+fw:config({ table_name = "matchstick", family = "inet", input_policy = "drop", output_policy = "accept" })
+```
+
+### Advanced
+```lua
+-- Custom chains at arbitrary hooks/priorities (rules are nftables JSON)
+fw:chain("prerouting", { type = "filter", priority = "mangle", rules = { ... } })
+
+-- Raw nftables JSON escape hatch
+fw:raw_nft({ add = { chain = { family = "inet", table = "matchstick", name = "my_chain", ... } } })
+```
+
+## CLI
+
+```
+matchstick check config.lua                 # validate
+matchstick render config.lua                # print nftables text
+matchstick render --json config.lua         # print nftables JSON
+matchstick apply config.lua                 # apply to kernel + set sysctls
+matchstick apply --no-sysctl config.lua     # apply without sysctl changes
+matchstick diff config.lua                  # diff running vs generated
+matchstick show matrix config.lua           # zone policy matrix
+matchstick show topology config.lua         # network topology diagram
+matchstick show sysctl config.lua           # show derived sysctls
+matchstick show json config.lua             # full state dump
+matchstick import-ufw                       # convert UFW rules from stdin
+```
+
+## Architecture
+
+- `src/matchstickpkg/` — pure library (no I/O, no system calls)
+- `src/lua54/ffi.nim` — vendored Lua 5.4 C FFI
+- `src/matchstick.nim` — CLI binary
+- `src/nftables_ffi.nim` — nft binary interaction (system-only)
+- Compile with `-d:noSystem` for JS/WASM builds (excludes apply/diff/sysctl write)
+
+## Install
+
+```
+git clone https://github.com/elee1766/matchstick
+cd matchstick
+make install
+```
+
+## Links
+
+- Source: https://github.com/elee1766/matchstick
+- Docs: https://elee1766.github.io/matchstick/docs/
+- Playground: https://elee1766.github.io/matchstick/playground/
+- License: AGPL-3.0

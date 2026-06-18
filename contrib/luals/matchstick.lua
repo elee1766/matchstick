@@ -163,7 +163,9 @@ function fw:docker(opts) end
 function fw:config(opts) end
 
 --- Include another Lua config file.
+--- The included file can return a value (typically a table) to export definitions.
 ---@param path string Path to Lua file (relative to current config dir)
+---@return any ... Values returned by the included file
 function fw:include(path) end
 
 --- Set or unset kernel sysctl values.

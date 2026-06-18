@@ -20,6 +20,7 @@ build:
 install: build
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
+	install -m 755 msctl $(DESTDIR)$(BINDIR)/msctl
 	install -d $(DESTDIR)$(SYSCONFDIR)/matchstick
 	install -d $(DESTDIR)$(SHAREDIR)/examples
 	install -m 644 contrib/examples/*.lua $(DESTDIR)$(SHAREDIR)/examples/
@@ -28,6 +29,7 @@ install: build
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+	rm -f $(DESTDIR)$(BINDIR)/msctl
 	rm -rf $(DESTDIR)$(SHAREDIR)
 
 clean:

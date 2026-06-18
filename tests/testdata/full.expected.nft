@@ -77,7 +77,7 @@ table inet matchstick {
         icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, mld-listener-query, mld-listener-report } accept
         icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
         icmpv6 type echo-request limit rate 10/second burst 5 packets accept
-        drop
+        meta nfproto ipv6 drop
     }
 
     chain rpfilter {
@@ -125,6 +125,7 @@ table inet matchstick {
         fib daddr type multicast drop
         iifname . oifname vmap @forward_zones
         update @_lograte_4 { ip saddr limit rate 5/minute burst 5 packets } log prefix "matchstick forward DROP "
+        update @_lograte_6 { ip6 saddr limit rate 5/minute burst 5 packets } log prefix "matchstick forward DROP "
         drop
     }
 

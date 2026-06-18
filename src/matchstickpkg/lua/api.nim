@@ -4,7 +4,7 @@
 ## Lua registry and operates on it. setupLuaVM registers them all.
 
 import std/[os, options, tables, json, strutils]
-import ../../lua54/ffi
+import ../../lua55/ffi
 import ./helpers
 import ../types
 
@@ -829,7 +829,7 @@ proc fwException(L: LuaState): cint {.cdecl.} =
 # fw:include("path.lua")
 # ---------------------------------------------------------------------------
 
-const maxIncludeDepth = 16
+const maxIncludeDepth = 8  # Each level uses ~10 Lua C stack slots; keep well under LUAI_MAXCSTACK
 
 proc fwInclude(L: LuaState): cint {.cdecl.} =
   let state = getState(L)
@@ -880,20 +880,28 @@ proc fwInclude(L: LuaState): cint {.cdecl.} =
   let prevDir = configDir
   setConfigDir(L, fullPath.parentDir)
 
+  # Record stack top before loading so we can count return values correctly
+  let base = lua_gettop(L)
+
   # Load and execute the file
   var status = luaL_loadfile(L, fullPath.cstring)
   if status != LUA_OK:
     discard luaL_error(L, "fw:include: %s", lua_tostring(L, -1))
 
+  # Save/restore Nim's frame state around lua_pcall. If the included file
+  # errors, lua_pcall's longjmp corrupts Nim's TFrame chain. We restore it
+  # so the subsequent luaL_error (which also longjmps) doesn't crash.
+  let savedFrameState = getFrameState()
   status = lua_pcall(L, 0, LUA_MULTRET, 0)
+  setFrameState(savedFrameState)
   if status != LUA_OK:
     discard luaL_error(L, "fw:include: %s", lua_tostring(L, -1))
 
   # Restore previous config dir
   setConfigDir(L, prevDir)
 
-  # Return whatever the included file returned
-  return lua_gettop(L)
+  # Return only values pushed by the included file (not our arguments)
+  return lua_gettop(L) - base
 
 # ---------------------------------------------------------------------------
 # util:rate("5/minute", { burst = 5, name = "ssh_limit" })

@@ -1,7 +1,5 @@
 ## emit_json.nim - nftables JSON serialization via std/json.
-##
 ## Builds JsonNode trees from IR types, then uses std/json for formatting.
-## No manual string building, comma tracking, or template helpers needed.
 
 import std/[strutils, json]
 import ./nft_ir

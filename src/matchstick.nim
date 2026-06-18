@@ -1,9 +1,8 @@
 ## matchstick - Lua-based nftables firewall configuration tool
 
 import std/[os, strformat, options, tables, parseopt, strutils]
-import ./lua54/ffi
+import ./lua55/sandbox
 import ./matchstickpkg/types
-import ./matchstickpkg/lua/api
 import ./matchstickpkg/build
 import ./matchstickpkg/emit_text
 import ./matchstickpkg/emit_json
@@ -15,13 +14,30 @@ import ./matchstickpkg/import_ufw
 import experimental/diff
 
 when not defined(noSystem):
-  import ./nftables_ffi
+  import ./nftables_cli
+
+# ---------------------------------------------------------------------------
+# Version info (computed at compile time from git)
+# ---------------------------------------------------------------------------
+# git describe --tags --always --dirty produces:
+#   v0.1.0                   exactly on a tag
+#   v0.1.0-3-gabc1234        3 commits after v0.1.0
+#   v0.1.0-3-gabc1234-dirty  same, with uncommitted changes
+#   abc1234                   no tags at all
+#   abc1234-dirty             no tags, uncommitted changes
+
+const
+  versionString* = block:
+    let desc = staticExec("git describe --tags --always --dirty 2>/dev/null").strip()
+    if desc.len > 0: desc else: "unknown"
+  gitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null").strip()
+  compileDate* = CompileDate & " " & CompileTime
+  nimVersion* = NimVersion
 
 const
   defaultConfigPaths = [
     "/etc/matchstick/firewall.lua",
   ]
-  luaInstructionLimit = 10_000_000
 
 proc findConfig(): string =
   for path in defaultConfigPaths:
@@ -29,65 +45,44 @@ proc findConfig(): string =
   return ""
 
 proc usage() =
-  stderr.writeLine """matchstick - Lua-based nftables firewall configuration tool
-
-Usage:
-  matchstick check  [config.lua]                    Validate config
-  matchstick render [config.lua]                    Print nftables text
-  matchstick render --json [config.lua]             Print nftables JSON"""
-
-  stderr.writeLine """  matchstick diff   <fileA> <fileB>                  Diff two rulesets (- for stdin)
-    .lua files are rendered; other files read as nft text
-    nft list table inet matchstick | matchstick diff firewall.lua -"""
-
+  stderr.writeLine "matchstick " & versionString
+  stderr.writeLine "Lua-based nftables firewall configuration tool"
+  stderr.writeLine ""
+  stderr.writeLine "Commands:"
+  stderr.writeLine "  check   [config]              Validate config"
+  stderr.writeLine "  render  [config]              Emit nftables text (--json for JSON)"
+  stderr.writeLine "  diff    <fileA> <fileB>       Diff two rulesets (- for stdin)"
   when not defined(noSystem):
-    stderr.writeLine """  matchstick apply  [config.lua]                    Apply to kernel
-  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes"""
-
-  stderr.writeLine """
-Options:
-  --allow-hooks                                      Allow fw:hook shell commands
-  --allow-raw-nft                                    Allow fw:chain/fw:raw_nft escape hatches
-
-  matchstick show matrix   [config.lua]             Zone policy matrix
-  matchstick show rules    [config.lua] <src> <dst> Rules for zone pair
-  matchstick show topology [config.lua]             Topology diagram
-    --format=dot|d2|mermaid|ascii                     (default: ascii)
-  matchstick show json     [config.lua]             State as JSON
-  matchstick show sysctl   [config.lua]             Show derived sysctls
-
-  matchstick import-ufw                             Import UFW rules from stdin
-                                                      sudo ufw show added | matchstick import-ufw
-
-If no config file is specified, searches:"""
-  for p in defaultConfigPaths:
-    stderr.writeLine "  " & p
+    stderr.writeLine "  apply   [config]              Apply to kernel (--no-sysctl to skip)"
+  stderr.writeLine "  show    <sub> [config]        Visualize config (see below)"
+  stderr.writeLine "  import-ufw                    Convert UFW rules from stdin"
+  stderr.writeLine "  version                       Print build info"
+  stderr.writeLine ""
+  stderr.writeLine "Show subcommands:"
+  stderr.writeLine "  matrix                        Zone policy grid"
+  stderr.writeLine "  rules   <src> <dst>           Rules for a zone pair"
+  stderr.writeLine "  topology                      Diagram (--format=dot|d2|mermaid|ascii)"
+  stderr.writeLine "  json                          Full state as JSON"
+  stderr.writeLine "  sysctl                        Derived sysctl settings"
+  stderr.writeLine ""
+  stderr.writeLine "Options:"
+  stderr.writeLine "  --allow-hooks                 Allow fw:hook shell commands"
+  stderr.writeLine "  --allow-raw-nft               Allow fw:chain/fw:raw_nft"
+  stderr.writeLine "  --json, -j                    JSON output (render, apply)"
+  stderr.writeLine "  --version, -v                 Print version"
+  stderr.writeLine ""
+  stderr.writeLine "Config is auto-detected from /etc/matchstick/firewall.lua if not specified."
+  stderr.writeLine ".lua files in diff are rendered; other files and - are read as text."
   quit(1)
 
 proc loadConfig(configFile: string): FirewallState =
-  var allocState: LuaAllocState
-  let L = luaL_newstate_limited(addr allocState)
-  if L == nil:
-    raise newException(CatchableError, "failed to create Lua state")
-  defer: lua_close(L)
-
-  luaL_openlibs_safe(L)
-  luaSetInstructionLimit(L, luaInstructionLimit)
-
-  let state = newFirewallState()
-  setupLuaVM(L, state, configFile)
-
-  var status = luaL_loadfile(L, configFile.cstring)
-  if status != LUA_OK:
-    let msg = $lua_tostring(L, -1)
-    raise newException(CatchableError, msg)
-
-  status = lua_pcall(L, 0, 0, 0)
-  if status != LUA_OK:
-    let msg = $lua_tostring(L, -1)
-    raise newException(CatchableError, msg)
-
-  return state
+  ## Load and execute a Lua firewall config.
+  ## Calls through lua55/sandbox which handles Lua↔Nim boundary safely.
+  let res = runConfig(configFile)
+  if res.error != "":
+    stderr.writeLine "error: " & res.error
+    quit(1)
+  return res.state
 
 proc printSummary(state: FirewallState) =
   stderr.writeLine &"""  zones:      {state.zones.len}
@@ -156,6 +151,9 @@ proc parseCli(): CliOpts =
         of "allow-raw-nft": result.allowRawNft = true
         of "format": result.format = val
         of "help", "h": usage()
+        of "version", "v", "V":
+          echo "matchstick " & versionString
+          quit(0)
         else:
           stderr.writeLine "error: unknown option: --" & key
           usage()
@@ -294,10 +292,10 @@ when not defined(noSystem):
       stderr.writeLine "error: config has validation errors, refusing to apply"
       quit(1)
     let ruleset = buildRuleset(state)
-    let text = emitText(ruleset)
+    let jsonStr = emitJson(ruleset, pretty = false)
 
     stderr.writeLine "validating..."
-    let valResult = nftValidate(text)
+    let valResult = nftValidate(jsonStr)
     if not valResult.success:
       stderr.writeLine "error: nftables validation failed:"
       stderr.writeLine valResult.error
@@ -321,7 +319,7 @@ when not defined(noSystem):
         stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
 
     stderr.writeLine "applying..."
-    let applyResult = nftApply(text)
+    let applyResult = nftApply(jsonStr)
     if not applyResult.success:
       stderr.writeLine "error: nftables apply failed:"
       stderr.writeLine applyResult.error
@@ -435,6 +433,13 @@ proc main() =
   let opts = parseCli()
 
   # Commands that don't need a config file
+  if opts.command == "version":
+    echo "matchstick " & versionString
+    echo "  commit:   " & gitCommit
+    echo "  built:    " & compileDate
+    echo "  nim:      " & nimVersion
+    return
+
   if opts.command == "import-ufw":
     try:
       cmdImportUfw()

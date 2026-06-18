@@ -1,7 +1,15 @@
 import std/os
 
 # Lua 5.4 is vendored and compiled from C sources.
-switch("passC", "-I" & (thisDir() / "vendor" / "lua54" / "src"))
+switch("passC", "-I" & (thisDir() / "vendor" / "lua55" / "src"))
+
+# Harden compiled-in C code (vendored Lua).
+switch("passC", "-fstack-protector-strong -D_FORTIFY_SOURCE=2")
+
+# Use goto-based exceptions instead of setjmp/longjmp. This is faster,
+# generates smaller binaries, and avoids conflicts with Lua's own longjmp
+# error handling (see lua54/sandbox.nim).
+switch("exceptions", "goto")
 
 when not defined(emscripten):
   switch("passC", "-DLUA_USE_POSIX")
