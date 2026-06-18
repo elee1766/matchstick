@@ -7,6 +7,7 @@
 ##   matchstick import-ufw < ufw-rules.txt
 
 import std/[strutils, sequtils, tables, sets, os, options, hashes]
+import ./writer
 
 proc escapeLuaString(s: string): string =
   ## Escape a string for safe inclusion in a Lua double-quoted string literal.
@@ -54,11 +55,9 @@ proc parseUfwLine(line: string): Option[UfwRule] =
     return none(UfwRule)
 
   var tokens: seq[string]
-  # Handle quoted strings (comments with spaces)
-  var i = 0
   var current = ""
   var inQuote = false
-  var quoteChar = ' '
+  var quoteChar = '\0'  # active quote delimiter when inQuote is true
   for c in trimmed:
     if inQuote:
       if c == quoteChar:
@@ -167,17 +166,16 @@ proc parseUfwLine(line: string): Option[UfwRule] =
 # ---------------------------------------------------------------------------
 
 proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): string =
-  var lines: seq[string]
+  var w = newWriter()
 
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "-- matchstick firewall config (generated from UFW)"
-  lines.add "--"
-  lines.add "-- Review this file and adjust:"
-  lines.add "--   1. Zone names and interface assignments"
-  lines.add "--   2. Host names for source IP addresses"
-  lines.add "--   3. Service names for well-known ports"
-  lines.add "---------------------------------------------------------------------------"
-  lines.add ""
+  w.line "---------------------------------------------------------------------------"
+  w.line "-- matchstick firewall config (generated from UFW)"
+  w.line "--"
+  w.line "--   1. Zone names and interface assignments"
+  w.line "--   2. Host names for source IP addresses"
+  w.line "--   3. Service names for well-known ports"
+  w.line "---------------------------------------------------------------------------"
+  w.emptyLine()
 
   # Collect unique interfaces, source addresses, and port/proto combos
   var ifaces: OrderedSet[string]
@@ -225,29 +223,29 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
     usedSvcNames.incl name
 
   # Emit services
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "-- Services"
-  lines.add "---------------------------------------------------------------------------"
+  w.line "---------------------------------------------------------------------------"
+  w.line "-- Services"
+  w.line "---------------------------------------------------------------------------"
   for pp, name in svcMap:
     let port = pp.port.replace(":", "-")  # UFW uses ":" for ranges, nftables uses "-"
     if pp.proto != "":
-      lines.add "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", \"" & escapeLuaString(pp.proto) & "\", \"" & escapeLuaString(port) & "\")"
+      w.line "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", \"" & escapeLuaString(pp.proto) & "\", \"" & escapeLuaString(port) & "\")"
     else:
-      lines.add "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", {\"tcp\", \"udp\"}, \"" & escapeLuaString(port) & "\")"
-  lines.add ""
+      w.line "local " & name & " = fw:service(\"" & escapeLuaString(name) & "\", {\"tcp\", \"udp\"}, \"" & escapeLuaString(port) & "\")"
+  w.emptyLine()
 
   # Emit zones
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "-- Zones"
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "local self = fw:zone(\"fw\")"
+  w.line "---------------------------------------------------------------------------"
+  w.line "-- Zones"
+  w.line "---------------------------------------------------------------------------"
+  w.line "local self = fw:zone(\"fw\")"
 
   # Zone naming
   var zoneNames: OrderedTable[string, string]
   if ifaces.len == 0:
     # No interface-specific rules, create a default
     zoneNames["eth0"] = "net"
-    lines.add "local net = fw:zone(\"net\", \"eth0\")  -- TODO: adjust interface"
+    w.line "local net = fw:zone(\"net\", \"eth0\")  -- TODO: adjust interface"
   else:
     for iface in ifaces:
       let zn = case iface
@@ -257,12 +255,12 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
         of "docker0": "docker"
         else: iface.replace("-", "_").replace("+", "")
       zoneNames[iface] = zn
-      lines.add "local " & zn & " = fw:zone(\"" & escapeLuaString(zn) & "\", \"" & escapeLuaString(iface) & "\")"
+      w.line "local " & zn & " = fw:zone(\"" & escapeLuaString(zn) & "\", \"" & escapeLuaString(iface) & "\")"
 
   # If no interfaces from rules, we still need a default zone for non-interface rules
   let defaultZone = if zoneNames.len > 0: zoneNames.values.toSeq[0] else: "net"
 
-  lines.add ""
+  w.emptyLine()
 
   # Emit hosts for single IP sources
   var hostNames: OrderedTable[string, string]
@@ -282,40 +280,40 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
       usedHostNames.incl name
 
   if hostNames.len > 0 or subnetAddrs.len > 0:
-    lines.add "---------------------------------------------------------------------------"
-    lines.add "-- Hosts"
-    lines.add "---------------------------------------------------------------------------"
-    for addr, name in hostNames:
-      lines.add "local " & name & " = fw:host(\"" & escapeLuaString(name) & "\", { zone = " & defaultZone & ", addr = \"" & escapeLuaString(addr) & "\" })"
-    lines.add ""
+    w.line "---------------------------------------------------------------------------"
+    w.line "-- Hosts"
+    w.line "---------------------------------------------------------------------------"
+    for a, name in hostNames:
+      w.line "local " & name & " = fw:host(\"" & escapeLuaString(name) & "\", { zone = " & defaultZone & ", addr = \"" & escapeLuaString(a) & "\" })"
+    w.emptyLine()
 
   # Emit IP lists for subnets
   if subnetAddrs.len > 0:
-    lines.add "---------------------------------------------------------------------------"
-    lines.add "-- IP lists (for subnet-based source filtering)"
-    lines.add "---------------------------------------------------------------------------"
-    for addr in subnetAddrs:
-      let octets = addr.split("/")[0].split(".")
+    w.line "---------------------------------------------------------------------------"
+    w.line "-- IP lists (for subnet-based source filtering)"
+    w.line "---------------------------------------------------------------------------"
+    for a in subnetAddrs:
+      let octets = a.split("/")[0].split(".")
       let name = "net_" & octets[0] & "_" & octets[1]
-      hostNames[addr] = name  # reuse hostNames for lookup
-      lines.add "fw:iplist(\"" & escapeLuaString(name) & "\", { type = \"ipv4\", flags = \"interval\", elements = { \"" & escapeLuaString(addr) & "\" } })"
-    lines.add ""
+      hostNames[a] = name  # reuse hostNames for lookup
+      w.line "fw:iplist(\"" & escapeLuaString(name) & "\", { type = \"ipv4\", flags = \"interval\", elements = { \"" & escapeLuaString(a) & "\" } })"
+    w.emptyLine()
 
   # Emit policies
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "-- Policies"
-  lines.add "---------------------------------------------------------------------------"
+  w.line "---------------------------------------------------------------------------"
+  w.line "-- Policies"
+  w.line "---------------------------------------------------------------------------"
   let inPol = inputPolicy.toLowerAscii.strip(chars = {'"', '\''})
   let outPol = outputPolicy.toLowerAscii.strip(chars = {'"', '\''})
-  lines.add "fw:policy(\"*\", self, \"" & inPol & "\", { log = true })"
-  lines.add "fw:policy(self, \"*\", \"" & outPol & "\")"
-  lines.add "fw:policy(\"*\", \"*\", \"drop\")"
-  lines.add ""
+  w.line "fw:policy(\"*\", self, \"" & inPol & "\", { log = true })"
+  w.line "fw:policy(self, \"*\", \"" & outPol & "\")"
+  w.line "fw:policy(\"*\", \"*\", \"drop\")"
+  w.emptyLine()
 
   # Emit rules
-  lines.add "---------------------------------------------------------------------------"
-  lines.add "-- Rules"
-  lines.add "---------------------------------------------------------------------------"
+  w.line "---------------------------------------------------------------------------"
+  w.line "-- Rules"
+  w.line "---------------------------------------------------------------------------"
 
   for r in rules:
     var commentStr = ""
@@ -348,7 +346,7 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
     elif r.direction == ufwRoute:
       # Forward rule
       let fromZone = if r.iface != "" and r.iface in zoneNames: zoneNames[r.iface] else: "\"*\""
-      lines.add "fw:rule(" & fromZone & ", \"*\", \"" & action & "\")" & commentStr
+      w.line "fw:rule(" & fromZone & ", \"*\", \"" & action & "\")" & commentStr
       continue
     else:
       dst = "self"
@@ -356,26 +354,26 @@ proc generateLua*(rules: seq[UfwRule], inputPolicy, outputPolicy: string): strin
     # Determine service/port
     if r.port == "" and r.proto == "":
       # Bare rule
-      lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\")" & commentStr
+      w.line "fw:rule(" & src & ", " & dst & ", \"" & action & "\")" & commentStr
     else:
       let pp: PortProto = (r.port, r.proto)
       if pp in svcMap:
         let svcName = svcMap[pp]
         if r.action == ufwLimit:
-          lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", {"
-          lines.add "  service = " & svcName & ","
-          lines.add "  rate = util:rate(\"6/minute\", { burst = 6 }),"
-          lines.add "})" & commentStr
+          w.line "fw:rule(" & src & ", " & dst & ", \"" & action & "\", {"
+          w.line "  service = " & svcName & ","
+          w.line "  rate = util:rate(\"6/minute\", { burst = 6 }),"
+          w.line "})" & commentStr
         elif r.fromAddr != "" and "/" in r.fromAddr and r.fromAddr in hostNames:
           # Subnet source needs saddr_list
-          lines.add "fw:rule(\"*\", " & dst & ", \"" & action & "\", { service = " & svcName & ", saddr_list = \"" & escapeLuaString(hostNames[r.fromAddr]) & "\" })" & commentStr
+          w.line "fw:rule(\"*\", " & dst & ", \"" & action & "\", { service = " & svcName & ", saddr_list = \"" & escapeLuaString(hostNames[r.fromAddr]) & "\" })" & commentStr
         else:
-          lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", " & svcName & ")" & commentStr
+          w.line "fw:rule(" & src & ", " & dst & ", \"" & action & "\", " & svcName & ")" & commentStr
       else:
-        lines.add "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { proto = \"" & escapeLuaString(r.proto) & "\", port = \"" & escapeLuaString(r.port.replace(":", "-")) & "\" })" & commentStr
+        w.line "fw:rule(" & src & ", " & dst & ", \"" & action & "\", { proto = \"" & escapeLuaString(r.proto) & "\", port = \"" & escapeLuaString(r.port.replace(":", "-")) & "\" })" & commentStr
 
-  lines.add ""
-  return lines.join("\n") & "\n"
+  w.emptyLine()
+  return w.result
 
 # ---------------------------------------------------------------------------
 # Read UFW defaults

@@ -8,9 +8,9 @@
 
 import std/[options, tables, strutils, json, sequtils]
 import ./types
+import ./writer
 
 proc countRulesForPair(state: FirewallState, src, dst: string): int =
-  ## Count the number of explicit rules for a given zone pair.
   for rule in state.rules:
     if rule.src.zone != nil and rule.dst.zone != nil:
       if rule.src.zone.name == src and rule.dst.zone.name == dst:
@@ -20,45 +20,42 @@ proc countRulesForPair(state: FirewallState, src, dst: string): int =
 # show matrix -- zone policy grid
 # ---------------------------------------------------------------------------
 
-proc showMatrix*(state: FirewallState) =
-  # Collect zone names in declaration order
+proc showMatrix*(state: FirewallState): string =
+  var w = newWriter()
   var zoneNames: seq[string]
   for name, zone in state.zones:
     zoneNames.add name
 
-  # Build policy map
   type ZPKey = tuple[src, dst: string]
-  var policyMap: Table[ZPKey, (Action, bool)]  # action, logged
+  var policyMap: Table[ZPKey, (Action, bool)]
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     policyMap[(pol.src.zone.name, pol.dst.zone.name)] = (pol.action, pol.log)
 
-  # Count rules per zone pair
   var ruleCount: Table[ZPKey, int]
   for rule in state.rules:
     if rule.src.zone == nil or rule.dst.zone == nil: continue
     let key: ZPKey = (rule.src.zone.name, rule.dst.zone.name)
     ruleCount[key] = ruleCount.getOrDefault(key, 0) + 1
 
-  # Find column width (minimum 10 for readability)
   let colW = max(10, zoneNames.mapIt(it.len).max + 2)
 
   # Header
-  stdout.write "  " & "src \\ dst".alignLeft(colW)
+  w.add "  " & "src \\ dst".alignLeft(colW)
   for dst in zoneNames:
-    stdout.write dst.alignLeft(colW)
-  echo ""
-  stdout.write "  " & "-".repeat(colW)
+    w.add dst.alignLeft(colW)
+  w.emptyLine()
+  w.add "  " & "-".repeat(colW)
   for dst in zoneNames:
-    stdout.write "-".repeat(colW)
-  echo ""
+    w.add "-".repeat(colW)
+  w.emptyLine()
 
   # Rows
   for src in zoneNames:
-    stdout.write "  " & src.alignLeft(colW)
+    w.add "  " & src.alignLeft(colW)
     for dst in zoneNames:
       if src == dst:
-        stdout.write "--".alignLeft(colW)
+        w.add "--".alignLeft(colW)
         continue
       let key: ZPKey = (src, dst)
       let rc = ruleCount.getOrDefault(key, 0)
@@ -68,41 +65,38 @@ proc showMatrix*(state: FirewallState) =
           of actAccept: "ACPT"
           of actDrop: "DROP"
           of actReject: "REJ"
-        if logged:
-          cell = "* " & cell
-        if rc > 0:
-          cell &= " " & $rc & "r"
-        stdout.write cell.alignLeft(colW)
+        if logged: cell = "* " & cell
+        if rc > 0: cell &= " " & $rc & "r"
+        w.add cell.alignLeft(colW)
       else:
-        # Default policy (drop)
         var cell = "drop"
-        if rc > 0:
-          cell = $rc & "r"
-        stdout.write cell.alignLeft(colW)
-    echo ""
+        if rc > 0: cell = $rc & "r"
+        w.add cell.alignLeft(colW)
+    w.emptyLine()
 
-  echo ""
-  echo "  ACPT=accept  DROP=drop  REJ=reject  *=logged  Nr=N rules"
+  w.emptyLine()
+  w.line "  ACPT=accept  DROP=drop  REJ=reject  *=logged  Nr=N rules"
+  return w.result
 
 # ---------------------------------------------------------------------------
 # show rules -- drill-down per zone pair
 # ---------------------------------------------------------------------------
 
 proc resolveZone(state: FirewallState, name: string): Zone =
-  ## Resolve a zone or host name to a Zone. Returns nil if not found.
   if name in state.zones: return state.zones[name]
   if name in state.hosts: return state.hosts[name].zone
   return nil
 
-proc showRules*(state: FirewallState, srcName, dstName: string) =
+proc showRules*(state: FirewallState, srcName, dstName: string): string =
   let srcZone = state.resolveZone(srcName)
   if srcZone == nil:
-    stderr.writeLine "error: unknown zone or host: " & srcName; return
+    return "error: unknown zone or host: " & srcName & "\n"
   let dstZone = state.resolveZone(dstName)
   if dstZone == nil:
-    stderr.writeLine "error: unknown zone or host: " & dstName; return
+    return "error: unknown zone or host: " & dstName & "\n"
 
-  # Find policy
+  var w = newWriter()
+
   var policyStr = "drop (default)"
   var policyLogged = false
   for pol in state.policies:
@@ -110,37 +104,21 @@ proc showRules*(state: FirewallState, srcName, dstName: string) =
       policyStr = $pol.action
       policyLogged = pol.log
       break
+  if policyLogged: policyStr &= ", logged"
 
-  if policyLogged:
-    policyStr &= ", logged"
+  w.line "  " & srcName & " -> " & dstName & " (policy: " & policyStr & ")"
+  w.line "  " & "-".repeat(40)
 
-  echo "  " & srcName & " -> " & dstName & " (policy: " & policyStr & ")"
-  echo "  " & "-".repeat(40)
-
-  # Find rules for this pair
   var idx = 0
   for rule in state.rules:
-    if rule.src.zone != srcZone or rule.dst.zone != dstZone:
-      continue
-
+    if rule.src.zone != srcZone or rule.dst.zone != dstZone: continue
     inc idx
     var parts: seq[string]
     parts.add $idx & "."
     parts.add alignLeft($rule.action, 8)
-
-    # Source narrowing
-    if rule.src.host.isSome:
-      parts.add "from:" & rule.src.host.get.name
-
-    # Dest narrowing
-    if rule.dst.host.isSome:
-      parts.add "to:" & rule.dst.host.get.name
-
-    # IP list
-    if rule.saddrList != "":
-      parts.add "saddr @" & rule.saddrList
-
-    # Service or proto/port
+    if rule.src.host.isSome: parts.add "from:" & rule.src.host.get.name
+    if rule.dst.host.isSome: parts.add "to:" & rule.dst.host.get.name
+    if rule.saddrList != "": parts.add "saddr @" & rule.saddrList
     if rule.service.isSome:
       let svc = rule.service.get
       var desc = svc.name & " ("
@@ -153,94 +131,84 @@ proc showRules*(state: FirewallState, srcName, dstName: string) =
     elif rule.proto.len > 0:
       for proto in rule.proto:
         var desc = proto
-        if rule.port.len > 0:
-          desc &= "/" & rule.port.join(",")
+        if rule.port.len > 0: desc &= "/" & rule.port.join(",")
         parts.add desc
-
-    # Rate
-    if rule.rate.isSome:
-      parts.add "rate:" & rule.rate.get.rate
-
-    # Log
-    if rule.log != "":
-      parts.add "log:" & rule.log
-
-    echo "  " & parts.join("  ")
+    if rule.rate.isSome: parts.add "rate:" & rule.rate.get.rate
+    if rule.log != "": parts.add "log:" & rule.log
+    w.line "  " & parts.join("  ")
 
   if idx == 0:
-    echo "  (no explicit rules)"
+    w.line "  (no explicit rules)"
+
+  return w.result
 
 # ---------------------------------------------------------------------------
 # show topology -- diagram output
 # ---------------------------------------------------------------------------
 
-proc showTopologyDot*(state: FirewallState) =
-  echo "digraph matchstick {"
-  echo "    rankdir=LR;"
-  echo "    node [shape=box, style=\"rounded,filled\", fontname=\"sans-serif\"];"
-  echo "    edge [fontname=\"sans-serif\", fontsize=10];"
-  echo ""
+proc showTopologyDot*(state: FirewallState): string =
+  var w = newWriter()
+  w.line "digraph matchstick {"
+  w.line "    rankdir=LR;"
+  w.line "    node [shape=box, style=\"rounded,filled\", fontname=\"sans-serif\"];"
+  w.line "    edge [fontname=\"sans-serif\", fontsize=10];"
+  w.emptyLine()
 
-  # Zone nodes
   for name, zone in state.zones:
-    let color = if zone.interfaces.len == 0: "#ffffcc"  # fw = yellow
-                elif name.contains("inet") or name.contains("wan"): "#ffcccc"  # WAN = red
-                elif name.contains("dock"): "#ccccff"  # Docker = blue
-                else: "#ccffcc"  # LAN = green
+    let color = if zone.interfaces.len == 0: "#ffffcc"
+                elif name.contains("inet") or name.contains("wan"): "#ffcccc"
+                elif name.contains("dock"): "#ccccff"
+                else: "#ccffcc"
     let ifaces = if zone.interfaces.len > 0: "\\n" & zone.interfaces.join(", ")
                  else: "\\n(local)"
-    echo "    " & name & " [fillcolor=\"" & color & "\", label=\"" & name & ifaces & "\"];"
+    w.line "    " & name & " [fillcolor=\"" & color & "\", label=\"" & name & ifaces & "\"];"
 
-  echo ""
+  w.emptyLine()
 
-  # Policy edges
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     let src = pol.src.zone.name
     let dst = pol.dst.zone.name
     if src == dst: continue
-
     let (color, style, label) = case pol.action
       of actAccept: ("green", "solid", "ACCEPT")
       of actDrop: ("red", "dashed", "DROP")
       of actReject: ("orange", "dashed", "REJECT")
-
-    # Count rules for this pair
     let rc = countRulesForPair(state, src, dst)
     var edgeLabel = label
-    if rc > 0:
-      edgeLabel &= " (" & $rc & " rules)"
-
-    echo "    " & src & " -> " & dst & " [label=\"" & edgeLabel &
+    if rc > 0: edgeLabel &= " (" & $rc & " rules)"
+    w.line "    " & src & " -> " & dst & " [label=\"" & edgeLabel &
          "\", color=" & color & ", style=" & style & "];"
 
-  echo "}"
+  w.line "}"
+  return w.result
 
-proc showTopologyMermaid*(state: FirewallState) =
-  echo "graph LR"
+proc showTopologyMermaid*(state: FirewallState): string =
+  var w = newWriter()
+  w.line "graph LR"
 
   for name, zone in state.zones:
     let ifaces = if zone.interfaces.len > 0: "<br/>" & zone.interfaces.join(", ")
                  else: "<br/>local"
-    echo "    " & name & "[" & name & ifaces & "]"
+    w.line "    " & name & "[" & name & ifaces & "]"
 
-  echo ""
+  w.emptyLine()
 
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     let src = pol.src.zone.name
     let dst = pol.dst.zone.name
     if src == dst: continue
-
     let arrow = case pol.action
       of actAccept: " -->|ACCEPT| "
       of actDrop: " -.->|DROP| "
       of actReject: " -.->|REJECT| "
+    w.line "    " & src & arrow & dst
 
-    echo "    " & src & arrow & dst
+  return w.result
 
-proc showTopologyD2*(state: FirewallState) =
-  # Zone nodes with containers
+proc showTopologyD2*(state: FirewallState): string =
+  var w = newWriter()
   for name, zone in state.zones:
     let fillColor = if zone.interfaces.len == 0: "#ffffcc"
                     elif name.contains("inet") or name.contains("wan"): "#ffcccc"
@@ -248,122 +216,100 @@ proc showTopologyD2*(state: FirewallState) =
                     else: "#ccffcc"
     let ifaces = if zone.interfaces.len > 0: zone.interfaces.join(", ")
                  else: "local"
-    echo name & ": " & name & " (" & ifaces & ") {"
-    echo "  style.fill: \"" & fillColor & "\""
-    echo "}"
-    echo ""
+    w.line name & ": " & name & " (" & ifaces & ") {"
+    w.line "  style.fill: \"" & fillColor & "\""
+    w.line "}"
+    w.emptyLine()
 
-  # Edges
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     let src = pol.src.zone.name
     let dst = pol.dst.zone.name
     if src == dst: continue
-
     let rc = countRulesForPair(state, src, dst)
-
     let label = $pol.action & (if rc > 0: " (" & $rc & " rules)" else: "")
     let strokeColor = case pol.action
       of actAccept: "green"
       of actDrop: "red"
       of actReject: "orange"
-
-    echo src & " -> " & dst & ": " & label & " {"
-    echo "  style.stroke: " & strokeColor
+    w.line src & " -> " & dst & ": " & label & " {"
+    w.line "  style.stroke: " & strokeColor
     if pol.action in {actDrop, actReject}:
-      echo "  style.stroke-dash: 3"
-    echo "}"
+      w.line "  style.stroke-dash: 3"
+    w.line "}"
 
-proc showTopologyAscii*(state: FirewallState) =
-  # Build box-and-arrow ASCII diagram
+  return w.result
+
+proc showTopologyAscii*(state: FirewallState): string =
+  var w = newWriter()
   var zoneNames: seq[string]
   for name, zone in state.zones:
     zoneNames.add name
 
-  # Zone boxes
-  echo ""
-  echo "  Zones:"
-  echo "  ┌─────────────────────────────────────────────────┐"
+  w.emptyLine()
+  w.line "  Zones:"
+  w.line "  ┌─────────────────────────────────────────────────┐"
   for name, zone in state.zones:
     let ifaces = if zone.interfaces.len > 0: zone.interfaces.join(", ")
                  else: "(local)"
-    let line = "  │  [" & name & "]"
-    echo line & " ".repeat(max(1, 50 - line.len - ifaces.len)) & ifaces & " │"
-  echo "  └─────────────────────────────────────────────────┘"
+    let prefix = "  │  [" & name & "]"
+    w.line prefix & " ".repeat(max(1, 50 - prefix.len - ifaces.len)) & ifaces & " │"
+  w.line "  └─────────────────────────────────────────────────┘"
 
-  # Policy summary as a directed graph
-  echo ""
-  echo "  Traffic Flow:"
-  echo ""
+  w.emptyLine()
+  w.line "  Traffic Flow:"
+  w.emptyLine()
 
-  # Group by relationship type for clarity
   var accepts, drops, rejects: seq[string]
-
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     let src = pol.src.zone.name
     let dst = pol.dst.zone.name
-
     let rc = countRulesForPair(state, src, dst)
-
     var detail = ""
     if rc > 0: detail = " (" & $rc & " rules)"
     if pol.log: detail &= " [logged]"
-
     let arrow = case pol.action
       of actAccept: " ──▶ "
       of actDrop:   " ──╳ "
       of actReject: " ──! "
     let entry = "    " & src.alignLeft(6) & arrow
     let line = entry & dst.alignLeft(6) & " " & ($pol.action).alignLeft(8) & detail
-
     case pol.action
     of actAccept: accepts.add line
     of actDrop: drops.add line
     of actReject: rejects.add line
 
   if accepts.len > 0:
-    echo "  ── Allowed ──────────────────────────────────────"
-    for line in accepts:
-      echo line
+    w.line "  ── Allowed ──────────────────────────────────────"
+    for line in accepts: w.line line
   if drops.len > 0:
-    echo "  ── Dropped ──────────────────────────────────────"
-    for line in drops:
-      echo line
+    w.line "  ── Dropped ──────────────────────────────────────"
+    for line in drops: w.line line
   if rejects.len > 0:
-    echo "  ── Rejected ─────────────────────────────────────"
-    for line in rejects:
-      echo line
-  echo ""
+    w.line "  ── Rejected ─────────────────────────────────────"
+    for line in rejects: w.line line
+  w.emptyLine()
+
+  return w.result
 
 # ---------------------------------------------------------------------------
 # show json -- full state dump
 # ---------------------------------------------------------------------------
 
-proc showStateJson*(state: FirewallState) =
+proc showStateJson*(state: FirewallState): string =
   var root = newJObject()
 
-  # Zones
   var zones = newJArray()
   for name, zone in state.zones:
-    zones.add %*{
-      "name": name,
-      "interfaces": zone.interfaces,
-      "bridge": zone.bridge,
-    }
+    zones.add %*{"name": name, "interfaces": zone.interfaces, "bridge": zone.bridge}
   root["zones"] = zones
 
-  # Hosts
   var hosts = newJArray()
   for name, host in state.hosts:
-    hosts.add %*{
-      "name": name,
-      "zone": host.zone.name,
-      "addr4": host.addr4,
-    }
+    hosts.add %*{"name": name, "zone": host.zone.name, "addr4": host.addr4}
   root["hosts"] = hosts
 
-  # Services
   var services = newJArray()
   for name, svc in state.services:
     var entries = newJArray()
@@ -372,7 +318,6 @@ proc showStateJson*(state: FirewallState) =
     services.add %*{"name": name, "entries": entries}
   root["services"] = services
 
-  # Policies
   var policies = newJArray()
   for pol in state.policies:
     var p = newJObject()
@@ -383,7 +328,6 @@ proc showStateJson*(state: FirewallState) =
     policies.add p
   root["policies"] = policies
 
-  # Rules
   var rules = newJArray()
   for rule in state.rules:
     var r = newJObject()
@@ -400,7 +344,6 @@ proc showStateJson*(state: FirewallState) =
     rules.add r
   root["rules"] = rules
 
-  # DNAT
   var dnats = newJArray()
   for dnat in state.dnatRules:
     var d = newJObject()
@@ -414,7 +357,6 @@ proc showStateJson*(state: FirewallState) =
     dnats.add d
   root["dnat"] = dnats
 
-  # SNAT
   var snats = newJArray()
   for snat in state.snatRules:
     var s = newJObject()
@@ -428,18 +370,11 @@ proc showStateJson*(state: FirewallState) =
     snats.add s
   root["snat"] = snats
 
-  # IP lists
   var iplists = newJArray()
   for name, ipl in state.ipLists:
-    iplists.add %*{
-      "name": name,
-      "type": ipl.ipType,
-      "flags": ipl.flags,
-      "elements": ipl.elements,
-    }
+    iplists.add %*{"name": name, "type": ipl.ipType, "flags": ipl.flags, "elements": ipl.elements}
   root["iplists"] = iplists
 
-  # Config
   root["config"] = %*{
     "table_name": state.config.tableName,
     "priority_offset": state.config.priorityOffset,
@@ -454,4 +389,4 @@ proc showStateJson*(state: FirewallState) =
     "output_policy": state.config.outputPolicy,
   }
 
-  echo root.pretty()
+  return root.pretty() & "\n"

@@ -46,6 +46,18 @@ proc checkNoShellMeta(L: LuaState, s: string, ctx: string) =
     if c in {';', '|', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r', '\0'}:
       discard luaL_error(L, "%s: contains unsafe character '%c'", ctx.cstring, c)
 
+proc checkMac(L: LuaState, mac: string, ctx: string) =
+  ## Validate MAC address format: aa:bb:cc:dd:ee:ff (17 chars, hex pairs with colons).
+  var valid = mac.len == 17
+  if valid:
+    for i, c in mac:
+      if i mod 3 == 2:
+        if c != ':': valid = false; break
+      else:
+        if c notin hexChars: valid = false; break
+  if not valid:
+    discard luaL_error(L, "%s: invalid MAC address '%s' (expected aa:bb:cc:dd:ee:ff)", ctx.cstring, mac.cstring)
+
 # ---------------------------------------------------------------------------
 # fw:zone(name, iface?, opts?)
 # ---------------------------------------------------------------------------
@@ -319,16 +331,7 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
 
       let mac = getStringField(L, 5, "mac")
       if mac != "":
-        # Validate MAC format: aa:bb:cc:dd:ee:ff (17 chars, hex pairs with colons)
-        var validMac = mac.len == 17
-        if validMac:
-          for i, c in mac:
-            if i mod 3 == 2:
-              if c != ':': validMac = false; break
-            else:
-              if c notin hexChars: validMac = false; break
-        if not validMac:
-          discard luaL_error(L, "fw:rule: invalid MAC address '%s' (expected aa:bb:cc:dd:ee:ff)", mac.cstring)
+        checkMac(L, mac, "fw:rule")
         rule.macAddr = mac
 
       let cl = getIntField(L, 5, "connlimit", 0)

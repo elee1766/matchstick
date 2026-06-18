@@ -1,7 +1,7 @@
-## nftables_ffi.nim - nftables interaction via the `nft` CLI.
+## nftables_ffi.nim - nftables interaction via the `nft` CLI binary.
 ##
-## Uses execProcess with explicit argument arrays -- no shell interpolation.
-## render/check/show commands work without nft installed.
+## Uses startProcess with explicit argument arrays -- no shell interpolation.
+## Only used by `apply`. All other commands are pure computation.
 
 import std/[osproc, os, tempfiles, streams]
 
@@ -49,18 +49,3 @@ proc nftValidate*(ruleset: string): NftResult =
 proc nftApply*(ruleset: string): NftResult =
   ## Apply a text ruleset via `nft -f <tmpfile>`. Requires root.
   nftRunWithFile(@["-f"], ruleset)
-
-proc nftListTable*(family, name: string): NftResult =
-  ## List a specific table from the running ruleset.
-  ## Uses execProcess with argument array -- no shell interpolation.
-  let nft = ensureNft()
-  let p = startProcess(nft, args = @["list", "table", family, name],
-                       options = {poUsePath, poStdErrToStdOut})
-  let output = p.outputStream.readAll()
-  let exitCode = p.waitForExit()
-  p.close()
-  result.success = (exitCode == 0)
-  if exitCode == 0:
-    result.output = output
-  else:
-    result.error = output

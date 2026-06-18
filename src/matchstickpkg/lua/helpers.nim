@@ -225,6 +225,8 @@ proc resolveHostAddr*(L: LuaState, state: FirewallState, idx: cint): string =
 proc luaToJson*(L: LuaState, idx: cint, depth: int = 0): JsonNode =
   ## Convert a Lua value at stack index `idx` to a JsonNode.
   ## Supports: nil, bool, int, float, string, table (array or object).
+  ## Tables with sequential integer keys [1..n] become JSON arrays;
+  ## all others become objects. Mixed tables use the array path only.
   if depth > 50:
     return newJNull()  # prevent infinite recursion
 

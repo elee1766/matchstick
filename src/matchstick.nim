@@ -12,8 +12,9 @@ import ./matchstickpkg/show
 import ./matchstickpkg/sysctl
 import ./matchstickpkg/import_ufw
 
+import experimental/diff
+
 when not defined(noSystem):
-  import experimental/diff
   import ./nftables_ffi
 
 const
@@ -35,10 +36,13 @@ Usage:
   matchstick render [config.lua]                    Print nftables text
   matchstick render --json [config.lua]             Print nftables JSON"""
 
+  stderr.writeLine """  matchstick diff   <fileA> <fileB>                  Diff two rulesets (- for stdin)
+    .lua files are rendered; other files read as nft text
+    nft list table inet matchstick | matchstick diff firewall.lua -"""
+
   when not defined(noSystem):
     stderr.writeLine """  matchstick apply  [config.lua]                    Apply to kernel
-  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes
-  matchstick diff   [config.lua]                    Diff running vs generated"""
+  matchstick apply  --no-sysctl [config.lua]        Apply without sysctl changes"""
 
   stderr.writeLine """
 Options:
@@ -141,16 +145,20 @@ proc parseCli(): CliOpts =
     of cmdArgument:
       positionals.add key
     of cmdShortOption, cmdLongOption:
-      case key
-      of "json", "j": result.jsonOutput = true
-      of "no-sysctl": result.noSysctl = true
-      of "allow-hooks": result.allowHooks = true
-      of "allow-raw-nft": result.allowRawNft = true
-      of "format": result.format = val
-      of "help", "h": usage()
+      if key == "":
+        # Bare "-" is treated as a positional (stdin convention)
+        positionals.add "-"
       else:
-        stderr.writeLine "error: unknown option: --" & key
-        usage()
+        case key
+        of "json", "j": result.jsonOutput = true
+        of "no-sysctl": result.noSysctl = true
+        of "allow-hooks": result.allowHooks = true
+        of "allow-raw-nft": result.allowRawNft = true
+        of "format": result.format = val
+        of "help", "h": usage()
+        else:
+          stderr.writeLine "error: unknown option: --" & key
+          usage()
     of cmdEnd: discard
 
   if positionals.len == 0:
@@ -165,16 +173,26 @@ proc parseCli(): CliOpts =
     result.showSub = rest[0]
     rest = rest[1..^1]
 
-  # Find config file among remaining positionals
-  for i, arg in rest:
-    if result.configFile == "" and fileExists(arg):
-      result.configFile = arg
+  if result.command == "diff":
+    # diff takes two positional args directly (not auto-detected config paths)
+    if rest.len >= 2:
+      result.configFile = rest[0]
+      result.extraArgs = rest[1..^1]
+    elif rest.len == 1:
+      result.configFile = rest[0]
     else:
-      result.extraArgs.add arg
+      result.configFile = ""
+  else:
+    # Find config file among remaining positionals
+    for i, arg in rest:
+      if result.configFile == "" and fileExists(arg):
+        result.configFile = arg
+      else:
+        result.extraArgs.add arg
 
-  # Fall back to default config paths
-  if result.configFile == "":
-    result.configFile = findConfig()
+    # Fall back to default config paths
+    if result.configFile == "":
+      result.configFile = findConfig()
 
 proc requireConfig(opts: CliOpts) =
   if opts.configFile == "":
@@ -232,23 +250,23 @@ proc cmdShow(opts: CliOpts) =
 
   case opts.showSub
   of "matrix":
-    showMatrix(state)
+    stdout.write showMatrix(state)
   of "rules":
     if opts.extraArgs.len < 2:
       stderr.writeLine "error: show rules requires <src> <dst> arguments"
       quit(1)
-    showRules(state, opts.extraArgs[0], opts.extraArgs[1])
+    stdout.write showRules(state, opts.extraArgs[0], opts.extraArgs[1])
   of "topology":
     case opts.format
-    of "dot": showTopologyDot(state)
-    of "d2": showTopologyD2(state)
-    of "mermaid": showTopologyMermaid(state)
-    of "ascii": showTopologyAscii(state)
+    of "dot": stdout.write showTopologyDot(state)
+    of "d2": stdout.write showTopologyD2(state)
+    of "mermaid": stdout.write showTopologyMermaid(state)
+    of "ascii": stdout.write showTopologyAscii(state)
     else:
       stderr.writeLine "error: unknown format: " & opts.format
       quit(1)
   of "json":
-    showStateJson(state)
+    stdout.write showStateJson(state)
   of "sysctl":
     let sysctls = deriveSysctls(state)
     stdout.write formatSysctls(sysctls)
@@ -317,61 +335,97 @@ when not defined(noSystem):
 
     echo "ok: rules applied"
 
-  proc unifiedDiff(a, b: string, labelA = "running", labelB = "generated", context = 3): string =
-    let linesA = a.splitLines()
-    let linesB = b.splitLines()
-    let items = diffText(a, b)
+# ---------------------------------------------------------------------------
+# Commands: diff (pure computation, no nft dependency)
+# ---------------------------------------------------------------------------
 
-    if items.len == 0: return ""
+proc unifiedDiff(a, b: string, labelA = "a", labelB = "b", context = 3): string =
+  let linesA = a.splitLines()
+  let linesB = b.splitLines()
+  let items = diffText(a, b)
 
-    result.add "--- " & labelA & "\n"
-    result.add "+++ " & labelB & "\n"
+  if items.len == 0: return ""
 
-    for item in items:
-      let startA = max(0, item.startA - context)
-      let startB = max(0, item.startB - context)
-      let endA = min(linesA.len, item.startA + item.deletedA + context)
-      let endB = min(linesB.len, item.startB + item.insertedB + context)
-      let countA = endA - startA
-      let countB = endB - startB
+  result.add "--- " & labelA & "\n"
+  result.add "+++ " & labelB & "\n"
 
-      result.add &"@@ -{startA + 1},{countA} +{startB + 1},{countB} @@\n"
+  for item in items:
+    let startA = max(0, item.startA - context)
+    let startB = max(0, item.startB - context)
+    let endA = min(linesA.len, item.startA + item.deletedA + context)
+    let endB = min(linesB.len, item.startB + item.insertedB + context)
+    let countA = endA - startA
+    let countB = endB - startB
 
-      for i in startA ..< item.startA:
-        result.add " " & linesA[i] & "\n"
-      for i in item.startA ..< item.startA + item.deletedA:
-        result.add "-" & linesA[i] & "\n"
-      for i in item.startB ..< item.startB + item.insertedB:
-        result.add "+" & linesB[i] & "\n"
-      for i in item.startA + item.deletedA ..< endA:
-        result.add " " & linesA[i] & "\n"
+    result.add &"@@ -{startA + 1},{countA} +{startB + 1},{countB} @@\n"
 
-  proc cmdDiff(opts: CliOpts) =
-    let state = loadConfig(opts.configFile)
-    enforceEscapeHatches(opts, state)
-    discard runValidation(state)
-    let ruleset = buildRuleset(state)
-    let generated = emitText(ruleset)
+    for i in startA ..< item.startA:
+      result.add " " & linesA[i] & "\n"
+    for i in item.startA ..< item.startA + item.deletedA:
+      result.add "-" & linesA[i] & "\n"
+    for i in item.startB ..< item.startB + item.insertedB:
+      result.add "+" & linesB[i] & "\n"
+    for i in item.startA + item.deletedA ..< endA:
+      result.add " " & linesA[i] & "\n"
 
-    let tn = state.config.tableName
-    let currentFilter = nftListTable("inet", tn)
-    let currentNat = nftListTable("inet", tn & "_nat")
+proc readDiffInput(path: string): string =
+  ## Read a diff input: "-" means stdin, ".lua" files are rendered, otherwise read as text.
+  if path == "-":
+    return stdin.readAll()
+  elif not fileExists(path):
+    stderr.writeLine "error: file not found: " & path
+    quit(1)
+  else:
+    return readFile(path)
 
-    var running = ""
-    if currentFilter.success: running &= currentFilter.output
-    if currentNat.success: running &= currentNat.output
+proc renderLuaConfig(path: string, opts: CliOpts): string =
+  ## Load a .lua config, validate, and render to nftables text.
+  let state = loadConfig(path)
+  enforceEscapeHatches(opts, state)
+  let ok = runValidation(state)
+  if not ok:
+    stderr.writeLine "error: config has validation errors"
+    quit(1)
+  let ruleset = buildRuleset(state)
+  return emitText(ruleset)
 
-    if running == "":
-      stderr.writeLine "note: no running matchstick tables found (table inet " & tn & ")"
-      echo "--- (no running rules)"
-      echo "+++ (generated)"
-      echo generated
-    else:
-      let d = unifiedDiff(running, generated)
-      if d == "":
-        echo "no differences"
-      else:
-        stdout.write d
+proc cmdDiff(opts: CliOpts) =
+  ## Diff two nftables rulesets. Each argument can be:
+  ##   - A .lua config file (rendered to nftables text)
+  ##   - A plain text file (used as-is)
+  ##   - "-" for stdin
+  ##
+  ## Examples:
+  ##   matchstick diff firewall.lua old.nft
+  ##   nft list table inet matchstick | matchstick diff firewall.lua -
+  ##   matchstick diff v1.lua v2.lua
+  if opts.extraArgs.len < 1:
+    stderr.writeLine "error: diff requires two arguments"
+    stderr.writeLine "usage: matchstick diff <fileA> <fileB>"
+    stderr.writeLine "  each file can be a .lua config, a text file, or - for stdin"
+    stderr.writeLine "  example: nft list table inet matchstick | matchstick diff firewall.lua -"
+    quit(1)
+
+  let pathA = opts.configFile
+  let pathB = if opts.extraArgs.len >= 1: opts.extraArgs[0] else: "-"
+
+  if pathA == "-" and pathB == "-":
+    stderr.writeLine "error: both inputs cannot be stdin"
+    quit(1)
+
+  let labelA = if pathA == "-": "(stdin)" else: pathA
+  let labelB = if pathB == "-": "(stdin)" else: pathB
+
+  let textA = if pathA.endsWith(".lua"): renderLuaConfig(pathA, opts)
+              else: readDiffInput(pathA)
+  let textB = if pathB.endsWith(".lua"): renderLuaConfig(pathB, opts)
+              else: readDiffInput(pathB)
+
+  let d = unifiedDiff(textA, textB, labelA, labelB)
+  if d == "":
+    echo "no differences"
+  else:
+    stdout.write d
 
 # ---------------------------------------------------------------------------
 # Main
@@ -384,6 +438,15 @@ proc main() =
   if opts.command == "import-ufw":
     try:
       cmdImportUfw()
+    except CatchableError as e:
+      stderr.writeLine "error: " & e.msg
+      quit(1)
+    return
+
+  # diff handles its own argument validation (two file args, not one config)
+  if opts.command == "diff":
+    try:
+      cmdDiff(opts)
     except CatchableError as e:
       stderr.writeLine "error: " & e.msg
       quit(1)
@@ -402,12 +465,6 @@ proc main() =
         quit(1)
       else:
         cmdApply(opts)
-    of "diff":
-      when defined(noSystem):
-        stderr.writeLine "error: 'diff' is not available in this build (compiled with -d:noSystem)"
-        quit(1)
-      else:
-        cmdDiff(opts)
     else:
       stderr.writeLine "error: unknown command: " & opts.command
       usage()

@@ -44,6 +44,21 @@ proc parsePortExpr(s: string): Expr =
   else:
     try: intExpr(parseInt(s)) except ValueError: strExpr(s)
 
+proc buildPortExpr(ports: seq[string]): Expr =
+  ## Build a port expression: single value, anonymous set, or nil for empty.
+  let exprs = ports.mapIt(parsePortExpr(it))
+  if exprs.len == 1: exprs[0]
+  elif exprs.len > 1: sortedAnonSetExpr(exprs)
+  else: nil
+
+proc addIfaceMatch(stmts: var seq[Stmt], ifaces: seq[string]) =
+  ## Add an interface match statement (single string or anonymous set).
+  if ifaces.len == 1:
+    stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(ifaces[0]))
+  elif ifaces.len > 1:
+    stmts.add matchStmt(opEq, metaExpr("iifname"),
+      anonSetExpr(ifaces.mapIt(strExpr(it))))
+
 proc logRateRule(fam, tn, chain, setName, proto, prefix: string): NftCmd =
   ## Build an nftables rule that rate-limits logging via a dynamic set.
   addRule(fam, tn, chain, @[
@@ -137,10 +152,7 @@ proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
     return buildServiceRules(state, rule.service.get, rule.action, saddrStmts, daddrStmts, extraStmts, v4, v6)
 
   if rule.proto.len > 0:
-    let portExprs = rule.port.mapIt(parsePortExpr(it))
-    let portExpr = if portExprs.len == 1: portExprs[0]
-                   elif portExprs.len > 1: sortedAnonSetExpr(portExprs)
-                   else: nil
+    let portExpr = buildPortExpr(rule.port)
     for proto in rule.proto:
       var stmts: seq[Stmt]
       stmts.add saddrStmts; stmts.add daddrStmts
@@ -178,22 +190,18 @@ proc analyzeZonePairs(state: FirewallState): seq[ZonePair] =
   type Key = tuple[s, d: string]
   var pairMap: Table[Key, ZonePair]
 
-  proc getOrCreate(src, dst: Zone): var ZonePair =
-    let key: Key = (src.name, dst.name)
-    if key notin pairMap: pairMap[key] = ZonePair(src: src, dst: dst)
-    pairMap[key]
-
+  # Mutate pairMap entries in-place to avoid copy-then-writeback confusion.
   for pol in state.policies:
     if pol.src.zone == nil or pol.dst.zone == nil: continue
-    var pair = getOrCreate(pol.src.zone, pol.dst.zone)
-    pair.policy = some(pol)
-    pairMap[(pol.src.zone.name, pol.dst.zone.name)] = pair
+    let key: Key = (pol.src.zone.name, pol.dst.zone.name)
+    if key notin pairMap: pairMap[key] = ZonePair(src: pol.src.zone, dst: pol.dst.zone)
+    pairMap[key].policy = some(pol)
 
   for rule in state.rules:
     if rule.src.zone == nil or rule.dst.zone == nil: continue
-    var pair = getOrCreate(rule.src.zone, rule.dst.zone)
-    pair.builtRules.add buildRuleExprs(state, rule)
-    pairMap[(rule.src.zone.name, rule.dst.zone.name)] = pair
+    let key: Key = (rule.src.zone.name, rule.dst.zone.name)
+    if key notin pairMap: pairMap[key] = ZonePair(src: rule.src.zone, dst: rule.dst.zone)
+    pairMap[key].builtRules.add buildRuleExprs(state, rule)
 
   for key, pair in pairMap: result.add pair
   result.sort(proc(a, b: ZonePair): int = cmp(a.src.name & a.dst.name, b.src.name & b.dst.name))
@@ -221,10 +229,7 @@ proc buildExceptionRules(state: FirewallState, exc: ChainException): seq[seq[Stm
     return
 
   if exc.proto.len > 0:
-    let portExprs = exc.port.mapIt(parsePortExpr(it))
-    let portExpr = if portExprs.len == 1: portExprs[0]
-                   elif portExprs.len > 1: sortedAnonSetExpr(portExprs)
-                   else: nil
+    let portExpr = buildPortExpr(exc.port)
     for proto in exc.proto:
       var stmts: seq[Stmt]
       if portExpr != nil:
@@ -235,6 +240,32 @@ proc buildExceptionRules(state: FirewallState, exc: ChainException): seq[seq[Stm
 
   # Bare exception -- just the action
   result.add @[action]
+
+proc addExceptionRules(cmds: var seq[NftCmd], state: FirewallState,
+                       fam, tn, chainTarget: string) =
+  ## Insert exception rules for a named chain (rpfilter, anti_smurf, invalid).
+  for exc in state.chainExceptions:
+    if exc.chain == chainTarget:
+      for er in buildExceptionRules(state, exc):
+        cmds.add addRule(fam, tn, chainTarget, er)
+
+proc addConntrackPreamble(cmds: var seq[NftCmd], fam, tn, chain: string,
+                          hasInvalidExceptions: bool) =
+  ## Add the standard conntrack preamble to a filter chain:
+  ## established/related accept, invalid drop/jump, anti_smurf jump.
+  cmds.add addRule(fam, tn, chain, @[
+    matchStmt(opEq, ctExpr("state"),
+      anonSetExpr(@[strExpr("established"), strExpr("related")])),
+    acceptStmt()])
+  if hasInvalidExceptions:
+    cmds.add addRule(fam, tn, chain, @[
+      matchStmt(opIn, ctExpr("state"), strExpr("invalid")),
+      jumpStmt("invalid")])
+  else:
+    cmds.add addRule(fam, tn, chain, @[
+      matchStmt(opIn, ctExpr("state"), strExpr("invalid")),
+      dropStmt()])
+  cmds.add addRule(fam, tn, chain, @[jumpStmt("anti_smurf")])
 
 # ---------------------------------------------------------------------------
 # Main build function
@@ -350,23 +381,13 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   # rpfilter
   if state.laundry.rpfilter:
     cmds.add addBaseChain(fam, tn, "rpfilter", "filter", "prerouting", priorityVal(0, offset), "accept")
-    # Exception rules for rpfilter (inserted before the drop)
-    for exc in state.chainExceptions:
-      if exc.chain == "rpfilter":
-        let excRules = buildExceptionRules(state, exc)
-        for er in excRules:
-          cmds.add addRule(fam, tn, "rpfilter", er)
+    cmds.addExceptionRules(state, fam, tn, "rpfilter")
     cmds.add addRule(fam, tn, "rpfilter", @[
       matchStmt(opEq, fibExpr("oif", @["saddr", "mark", "iif"]), strExpr("0")), dropStmt()])
 
   # anti_smurf
   cmds.add addChain(fam, tn, "anti_smurf")
-  # Exception rules for anti_smurf (inserted before the drops)
-  for exc in state.chainExceptions:
-    if exc.chain == "anti_smurf":
-      let excRules = buildExceptionRules(state, exc)
-      for er in excRules:
-        cmds.add addRule(fam, tn, "anti_smurf", er)
+  cmds.addExceptionRules(state, fam, tn, "anti_smurf")
   cmds.add addRule(fam, tn, "anti_smurf", @[matchStmt(opEq, fibExpr("type", @["saddr"]), strExpr("broadcast")), dropStmt()])
   cmds.add addRule(fam, tn, "anti_smurf", @[matchStmt(opEq, fibExpr("type", @["saddr"]), strExpr("multicast")), dropStmt()])
 
@@ -374,22 +395,13 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   let hasInvalidExceptions = state.chainExceptions.anyIt(it.chain == "invalid")
   if hasInvalidExceptions:
     cmds.add addChain(fam, tn, "invalid")
-    for exc in state.chainExceptions:
-      if exc.chain == "invalid":
-        let excRules = buildExceptionRules(state, exc)
-        for er in excRules:
-          cmds.add addRule(fam, tn, "invalid", er)
+    cmds.addExceptionRules(state, fam, tn, "invalid")
     cmds.add addRule(fam, tn, "invalid", @[dropStmt()])
 
   # Input chain
   cmds.add addBaseChain(fam, tn, "input", "filter", "input", priorityVal(0, offset), inputPolicy)
   cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, metaExpr("iif"), strExpr("lo")), acceptStmt()])
-  cmds.add addRule(fam, tn, "input", @[matchStmt(opEq, ctExpr("state"), anonSetExpr(@[strExpr("established"), strExpr("related")])), acceptStmt()])
-  if hasInvalidExceptions:
-    cmds.add addRule(fam, tn, "input", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), jumpStmt("invalid")])
-  else:
-    cmds.add addRule(fam, tn, "input", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
-  cmds.add addRule(fam, tn, "input", @[jumpStmt("anti_smurf")])
+  cmds.addConntrackPreamble(fam, tn, "input", hasInvalidExceptions)
 
   # DHCP
   for dc in state.dhcp:
@@ -435,12 +447,7 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
 
   # Forward chain
   cmds.add addBaseChain(fam, tn, "forward", "filter", "forward", priorityVal(0, offset), "drop")
-  cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, ctExpr("state"), anonSetExpr(@[strExpr("established"), strExpr("related")])), acceptStmt()])
-  if hasInvalidExceptions:
-    cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), jumpStmt("invalid")])
-  else:
-    cmds.add addRule(fam, tn, "forward", @[matchStmt(opIn, ctExpr("state"), strExpr("invalid")), dropStmt()])
-  cmds.add addRule(fam, tn, "forward", @[jumpStmt("anti_smurf")])
+  cmds.addConntrackPreamble(fam, tn, "forward", hasInvalidExceptions)
   if state.laundry.tcpStrict:
     cmds.add addRule(fam, tn, "forward", @[jumpStmt("tcp_strict")])
   if state.laundry.broadcastDrop:
@@ -522,12 +529,7 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
             for port in dnat.port: entries.add ServiceEntry(proto: proto, port: port)
         for entry in entries:
           var stmts: seq[Stmt]
-          # Match ANY interface in the zone (OR, not AND)
-          if dnat.iface.interfaces.len == 1:
-            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(dnat.iface.interfaces[0]))
-          elif dnat.iface.interfaces.len > 1:
-            stmts.add matchStmt(opEq, metaExpr("iifname"),
-              anonSetExpr(dnat.iface.interfaces.mapIt(strExpr(it))))
+          stmts.addIfaceMatch(dnat.iface.interfaces)
           if dnat.daddr != "" and isIpv4(dnat.daddr):
             stmts.add matchStmt(opEq, payloadExpr("ip", "daddr"), strExpr(dnat.daddr))
           if entry.proto notin ["icmp", "icmpv6"]:
@@ -540,16 +542,10 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       for redir in state.redirectRules:
         for proto in redir.proto:
           var stmts: seq[Stmt]
-          if redir.iface.interfaces.len == 1:
-            stmts.add matchStmt(opEq, metaExpr("iifname"), strExpr(redir.iface.interfaces[0]))
-          elif redir.iface.interfaces.len > 1:
-            stmts.add matchStmt(opEq, metaExpr("iifname"),
-              anonSetExpr(redir.iface.interfaces.mapIt(strExpr(it))))
-          let portExprs = redir.port.mapIt(parsePortExpr(it))
-          if portExprs.len == 1:
-            stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExprs[0])
-          elif portExprs.len > 1:
-            stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), sortedAnonSetExpr(portExprs))
+          stmts.addIfaceMatch(redir.iface.interfaces)
+          let portExpr = buildPortExpr(redir.port)
+          if portExpr != nil:
+            stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExpr)
           stmts.add redirectStmt(redir.destPort)
           cmds.add addRule(fam, natTn, "prerouting", stmts)
 
@@ -563,9 +559,9 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
           stmts.add matchStmt(opEq, payloadExpr("ip", "daddr"), strExpr(snat.daddr))
         stmts.add matchStmt(opEq, metaExpr("oifname"), strExpr(snat.oif))
         if snat.proto != "" and snat.port.len > 0:
-          let portExprs = snat.port.mapIt(parsePortExpr(it))
-          let portExpr = if portExprs.len == 1: portExprs[0] else: sortedAnonSetExpr(portExprs)
-          stmts.add matchStmt(opEq, payloadExpr(snat.proto, "dport"), portExpr)
+          let portExpr = buildPortExpr(snat.port)
+          if portExpr != nil:
+            stmts.add matchStmt(opEq, payloadExpr(snat.proto, "dport"), portExpr)
         if snat.masquerade: stmts.add masqueradeStmt()
         else:
           let family = if isIpv4(snat.addr4): "ip" else: "ip6"
@@ -599,20 +595,21 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       if cmd.kind == nckAdd and cmd.add.kind == nakRule:
         cmd.add.rule.expr.insert(counterStmt(), 0)
 
-  # Reorder: metainfo first, then tables, chains, sets/maps, raw lines, rules
-  var ordered: seq[NftCmd]
-  ordered.add metainfoCmd()
-  for c in cmds:
-    if c.kind == nckDelete: ordered.add c
-  for c in cmds:
-    if c.kind == nckAdd and c.add.kind == nakTable: ordered.add c
-  for c in cmds:
-    if c.kind == nckAdd and c.add.kind == nakChain: ordered.add c
-  for c in cmds:
-    if c.kind == nckAdd and c.add.kind in {nakSet, nakMap}: ordered.add c
-  for c in cmds:
-    if c.kind == nckRaw: ordered.add c
-  for c in cmds:
-    if c.kind == nckAdd and c.add.kind == nakRule: ordered.add c
+  # Reorder: nftables requires objects to be defined before they're referenced.
+  # Ordering: metainfo → deletes → tables → chains → sets/maps → raw → rules.
+  # Uses a sort key so new NftCmd/NftAdd kinds cause compile errors, not silent drops.
+  proc cmdSortKey(c: NftCmd): int =
+    case c.kind
+    of nckMetainfo: 0
+    of nckDelete:   1
+    of nckAdd:
+      case c.add.kind
+      of nakTable:    2
+      of nakChain:    3
+      of nakSet, nakMap: 4
+      of nakRule:     6
+    of nckRaw:      5
 
-  result = NftRuleset(nftables: ordered)
+  cmds.insert(metainfoCmd(), 0)
+  cmds.sort(proc(a, b: NftCmd): int = cmp(cmdSortKey(a), cmdSortKey(b)))
+  result = NftRuleset(nftables: cmds)

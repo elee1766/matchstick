@@ -1,7 +1,6 @@
 # Build output
 /matchstick
 /src/matchstick
-/matchstick_web
 /dist/
 /web/ssg
 /web/static/playground.js

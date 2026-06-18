@@ -4,7 +4,7 @@
 
 Lua-based nftables firewall configuration tool. Compiles declarative firewall configs into native nftables rulesets with automatic sysctl management, input validation, and shadow rule detection.
 
-**[Documentation](https://elee1766.github.io/matchstick/docs/)** | **[Website](https://elee1766.github.io/matchstick/)**
+**[Documentation](https://elee1766.github.io/matchstick/)**
 
 ## Example
 
@@ -62,7 +62,11 @@ matchstick check  firewall.lua           # validate config
 matchstick render firewall.lua           # print nftables text
 matchstick render --json firewall.lua    # print nftables JSON
 matchstick apply  firewall.lua           # apply to kernel (root)
-matchstick diff   firewall.lua           # diff running vs generated
+
+# diff two rulesets (.lua files are rendered, - is stdin)
+matchstick diff old.lua new.lua
+matchstick diff firewall.lua saved.nft
+nft list table inet matchstick | matchstick diff firewall.lua -
 
 matchstick show matrix   firewall.lua              # zone policy matrix
 matchstick show rules    firewall.lua wan fw        # rules for a zone pair
@@ -91,9 +95,10 @@ nimble build
 
 Requires Nim >= 2.2. Lua 5.4 is vendored and compiled from C sources -- no external dependency.
 
-The binary runs anywhere with just libc. libnftables is loaded at runtime
-only when needed (`apply`, `diff`). Install `nftables` on the target system
-for those commands.
+The binary runs anywhere with just libc. The `nft` binary is only needed
+for `apply` (to load rules into the kernel). All other commands (`check`,
+`render`, `diff`, `show`) are pure computation with no runtime dependencies.
+Install `nftables` on the target system for `apply`.
 
 ## Configuration
 

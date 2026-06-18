@@ -93,7 +93,9 @@ proc toQuoted*(e: Expr): string =
 
 proc nftJsonToText*(j: JsonNode): string =
   ## Convert an nftables JSON node (statement or expression) to text.
-  ## Handles the common nftables JSON schema structures.
+  ## The nftables JSON schema uses single-key objects as tagged unions:
+  ## {"match": {...}}, {"accept": null}, {"payload": {...}}, etc.
+  ## We extract the key, then dispatch on it with a case statement.
   if j == nil or j.kind == JNull:
     return ""
   case j.kind
@@ -106,97 +108,84 @@ proc nftJsonToText*(j: JsonNode): string =
     for elem in j: parts.add nftJsonToText(elem)
     return parts.join(" ")
   of JObject:
-    # Handle known nftables JSON structures
-    if "match" in j:
-      let m = j["match"]
-      let left = nftJsonToText(m.getOrDefault("left"))
-      let right = nftJsonToText(m.getOrDefault("right"))
-      let op = m.getOrDefault("op").getStr("==")
+    # nftables JSON objects are single-key tagged unions. Extract the tag.
+    var tag = ""
+    var val: JsonNode
+    for k, v in j:
+      tag = k; val = v; break
+    if tag == "": return $j
+
+    case tag
+    of "accept", "drop", "return", "counter", "masquerade":
+      return tag
+    of "match":
+      let left = nftJsonToText(val.getOrDefault("left"))
+      let right = nftJsonToText(val.getOrDefault("right"))
+      let op = val.getOrDefault("op").getStr("==")
       return left & " " & op & " " & right
-    if "accept" in j: return "accept"
-    if "drop" in j: return "drop"
-    if "return" in j: return "return"
-    if "reject" in j:
-      let r = j["reject"]
+    of "reject":
       var s = "reject"
-      if "type" in r: s &= " with " & r["type"].getStr()
-      if "expr" in r: s &= " " & r["expr"].getStr()
+      if "type" in val: s &= " with " & val["type"].getStr()
+      if "expr" in val: s &= " " & val["expr"].getStr()
       return s
-    if "jump" in j:
-      let t = j["jump"]
-      return "jump " & t.getOrDefault("target").getStr()
-    if "goto" in j:
-      let t = j["goto"]
-      return "goto " & t.getOrDefault("target").getStr()
-    if "counter" in j: return "counter"
-    if "log" in j:
-      let l = j["log"]
+    of "jump":
+      return "jump " & val.getOrDefault("target").getStr()
+    of "goto":
+      return "goto " & val.getOrDefault("target").getStr()
+    of "log":
       var s = "log"
-      if "prefix" in l: s &= " prefix \"" & escapeNftString(l["prefix"].getStr()) & "\""
-      if "level" in l: s &= " level " & l["level"].getStr()
+      if "prefix" in val: s &= " prefix \"" & escapeNftString(val["prefix"].getStr()) & "\""
+      if "level" in val: s &= " level " & val["level"].getStr()
       return s
-    if "limit" in j:
-      let l = j["limit"]
+    of "limit":
       var s = "limit rate "
-      if l.getOrDefault("inv").getBool(false): s &= "over "
-      s &= $l.getOrDefault("rate").getInt() & "/" & l.getOrDefault("per").getStr()
-      let burst = l.getOrDefault("burst").getInt()
+      if val.getOrDefault("inv").getBool(false): s &= "over "
+      s &= $val.getOrDefault("rate").getInt() & "/" & val.getOrDefault("per").getStr()
+      let burst = val.getOrDefault("burst").getInt()
       if burst > 0: s &= " burst " & $burst & " packets"
       return s
-    if "payload" in j:
-      let p = j["payload"]
-      return p.getOrDefault("protocol").getStr() & " " & p.getOrDefault("field").getStr()
-    if "meta" in j:
-      let m = j["meta"]
-      let key = m.getOrDefault("key").getStr()
+    of "payload":
+      return val.getOrDefault("protocol").getStr() & " " & val.getOrDefault("field").getStr()
+    of "meta":
+      let key = val.getOrDefault("key").getStr()
       case key
       of "iifname", "oifname", "iif", "oif", "iiftype", "oiftype": return key
       else: return "meta " & key
-    if "ct" in j:
-      let c = j["ct"]
+    of "ct":
       var s = "ct"
-      if "dir" in c: s &= " " & c["dir"].getStr()
-      s &= " " & c.getOrDefault("key").getStr()
+      if "dir" in val: s &= " " & val["dir"].getStr()
+      s &= " " & val.getOrDefault("key").getStr()
       return s
-    if "prefix" in j:
-      let p = j["prefix"]
-      return p.getOrDefault("addr").getStr() & "/" & $p.getOrDefault("len").getInt()
-    if "range" in j:
-      let r = j["range"]
-      if r.kind == JArray and r.len == 2:
-        return nftJsonToText(r[0]) & "-" & nftJsonToText(r[1])
-    if "concat" in j:
-      let c = j["concat"]
-      if c.kind == JArray:
+    of "prefix":
+      return val.getOrDefault("addr").getStr() & "/" & $val.getOrDefault("len").getInt()
+    of "range":
+      if val.kind == JArray and val.len == 2:
+        return nftJsonToText(val[0]) & "-" & nftJsonToText(val[1])
+      return $j
+    of "concat":
+      if val.kind == JArray:
         var parts: seq[string]
-        for elem in c: parts.add nftJsonToText(elem)
+        for elem in val: parts.add nftJsonToText(elem)
         return parts.join(" . ")
-    if "set" in j:
-      let s = j["set"]
-      if s.kind == JArray:
+      return $j
+    of "set":
+      if val.kind == JArray:
         var parts: seq[string]
-        for elem in s: parts.add nftJsonToText(elem)
+        for elem in val: parts.add nftJsonToText(elem)
         return "{ " & parts.join(", ") & " }"
-      elif s.kind == JString:
-        return "@" & s.getStr()
-    if "mangle" in j:
-      let m = j["mangle"]
-      return nftJsonToText(m.getOrDefault("key")) & " set " & nftJsonToText(m.getOrDefault("value"))
-    if "dnat" in j:
-      let d = j["dnat"]
-      var s = "dnat " & d.getOrDefault("family").getStr("ip") & " to " & d.getOrDefault("addr").getStr()
-      let port = d.getOrDefault("port").getInt()
+      elif val.kind == JString:
+        return "@" & val.getStr()
+      return $j
+    of "mangle":
+      return nftJsonToText(val.getOrDefault("key")) & " set " & nftJsonToText(val.getOrDefault("value"))
+    of "dnat", "snat":
+      var s = tag & " " & val.getOrDefault("family").getStr("ip") & " to " & val.getOrDefault("addr").getStr()
+      let port = val.getOrDefault("port").getInt()
       if port > 0: s &= ":" & $port
       return s
-    if "snat" in j:
-      let sn = j["snat"]
-      var s = "snat " & sn.getOrDefault("family").getStr("ip") & " to " & sn.getOrDefault("addr").getStr()
-      let port = sn.getOrDefault("port").getInt()
-      if port > 0: s &= ":" & $port
-      return s
-    if "masquerade" in j: return "masquerade"
-    # Fallback: render as compact JSON (better than nothing)
-    return $j
+    else:
+      # Unknown tag — render as compact JSON
+      return $j
   else:
     return $j
 

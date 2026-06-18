@@ -9,9 +9,8 @@ bin           = @["matchstick"]
 # Dependencies
 requires "nim >= 2.2.0"
 
-# Optional: web frontend
+# Static site / WASM playground
 requires "karax >= 1.3.3"
-requires "mummy >= 0.4.2"
 
 # Tasks
 task test, "Run all tests":
@@ -24,16 +23,6 @@ task test, "Run all tests":
   for f in listFiles("tests/integration"):
     if f.endsWith(".nim"):
       exec "nim c -r --hints:off --warnings:off " & f
-
-task web, "Build the web frontend":
-  exec "nim c -d:release -o:matchstick_web web/server.nim"
-
-task webrun, "Build and run the web frontend":
-  exec "nim c -d:release -o:matchstick_web web/server.nim"
-  exec "./matchstick_web"
-
-task webdev, "Build and run with auto-reload on changes":
-  exec "watchexec -r -w web/ -w src/ -e nim,css,js -- nim c -d:release -o:matchstick_web web/server.nim '&&' ./matchstick_web"
 
 task wasm, "Build WASM playground (requires Emscripten via mise)":
   exec "nim c --cpu:wasm32 -d:emscripten -d:noSystem -d:release " &
