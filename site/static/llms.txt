@@ -89,13 +89,25 @@ fw:raw_nft({ add = { chain = { family = "inet", table = "matchstick", name = "my
 
 ## CLI
 
+matchstick is the compiler (pure computation, no root needed).
+msctl is the system manager (wraps matchstick + nft for applying rules).
+
 ```
+# msctl (system management)
+msctl enable                                # compile + apply to kernel
+msctl disable                               # remove all rules
+msctl status                                # show running rules
+msctl diff                                  # diff running vs config
+msctl check                                 # validate config
+msctl edit                                  # edit, validate, apply
+msctl show                                  # zone policy matrix
+msctl show rules lan fw                     # rules for a zone pair
+
+# matchstick (compiler)
 matchstick check config.lua                 # validate
 matchstick render config.lua                # print nftables text
 matchstick render --json config.lua         # print nftables JSON
-matchstick apply config.lua                 # apply to kernel + set sysctls
-matchstick apply --no-sysctl config.lua     # apply without sysctl changes
-matchstick diff config.lua                  # diff running vs generated
+matchstick diff old.lua new.lua             # diff two rulesets (- for stdin)
 matchstick show matrix config.lua           # zone policy matrix
 matchstick show topology config.lua         # network topology diagram
 matchstick show sysctl config.lua           # show derived sysctls
@@ -106,10 +118,9 @@ matchstick import-ufw                       # convert UFW rules from stdin
 ## Architecture
 
 - `src/matchstickpkg/` — pure library (no I/O, no system calls)
-- `src/lua54/ffi.nim` — vendored Lua 5.4 C FFI
-- `src/matchstick.nim` — CLI binary
-- `src/nftables_ffi.nim` — nft binary interaction (system-only)
-- Compile with `-d:noSystem` for JS/WASM builds (excludes apply/diff/sysctl write)
+- `src/lua55/ffi.nim` — vendored Lua 5.5 C FFI
+- `src/matchstick.nim` — CLI binary (pure computation, no nft dependency)
+- `msctl` — shell script system manager (wraps matchstick + nft)
 
 ## Install
 

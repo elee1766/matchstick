@@ -160,7 +160,7 @@ proc njtNat(tag: string, val: JsonNode): string =
 var njtHandlers: Table[string, proc(tag: string, val: JsonNode): string]
 
 proc initNjtHandlers() =
-  for name in ["accept", "drop", "return", "counter", "masquerade"]:
+  for name in ["accept", "drop", "return", "counter", "masquerade", "notrack"]:
     njtHandlers[name] = njtVerdict
   njtHandlers["match"] = njtMatch
   njtHandlers["reject"] = njtReject
@@ -178,6 +178,7 @@ proc initNjtHandlers() =
   njtHandlers["mangle"] = njtMangle
   njtHandlers["dnat"] = njtNat
   njtHandlers["snat"] = njtNat
+  njtHandlers["tproxy"] = njtNat
 initNjtHandlers()
 
 proc nftJsonToText*(j: JsonNode): string =
@@ -253,6 +254,7 @@ proc emitStmt*(w: var Writer, s: Stmt) =
   of skAccept:     w.add "accept"
   of skDrop:       w.add "drop"
   of skReturn:     w.add "return"
+  of skNotrack:    w.add "notrack"
   of skReject:
     w.add "reject"
     if s.rejectType != "": w.add " with " & s.rejectType
@@ -282,6 +284,9 @@ proc emitStmt*(w: var Writer, s: Stmt) =
     if s.masqPort > 0: w.add " to :" & $s.masqPort
   of skRedirect:
     w.add "redirect to :" & $s.redirectPort
+  of skTproxy:
+    w.add "tproxy " & s.tproxyFamily & " to " & s.tproxyAddr
+    if s.tproxyPort > 0: w.add ":" & $s.tproxyPort
   of skVmap:    w.add s.vmapKey.toMatchLeft & " vmap " & s.vmapData.toText
   of skMangle:  w.add s.mangleKey.toText & " set " & s.mangleValue.toText
   of skUpdate:
@@ -297,6 +302,16 @@ proc emitStmt*(w: var Writer, s: Stmt) =
       w.add "tcp option maxseg size set " & $s.mssClampSize
     else:
       w.add "tcp option maxseg size set rt mtu"
+  of skQueue:
+    w.add "queue num " & $s.queueNum
+    if s.queueFlags != "": w.add " " & s.queueFlags
+  of skDup:
+    w.add "dup to " & s.dupAddr
+    if s.dupDev != "": w.add " device " & s.dupDev
+  of skQuota:
+    w.add "quota "
+    if s.quotaInv: w.add "over "
+    w.add $s.quotaVal & " " & s.quotaUnit
   of skRaw:
     w.add nftJsonToText(s.rawJson)
 

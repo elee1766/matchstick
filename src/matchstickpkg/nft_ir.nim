@@ -85,10 +85,10 @@ type
   # =========================================================================
 
   StmtKind* = enum
-    skMatch, skAccept, skDrop, skReject, skReturn,
+    skMatch, skAccept, skDrop, skReject, skReturn, skNotrack,
     skJump, skGoto, skCounter, skLog, skLimit,
-    skDnat, skSnat, skMasquerade, skRedirect, skVmap, skMangle, skUpdate,
-    skConnLimit, skMssClamp,
+    skDnat, skSnat, skMasquerade, skRedirect, skTproxy, skVmap, skMangle, skUpdate,
+    skConnLimit, skMssClamp, skQueue, skDup, skQuota,
     skRaw
 
   Stmt* = ref object
@@ -97,7 +97,7 @@ type
       matchOp*: MatchOp
       matchLeft*: Expr
       matchRight*: Expr
-    of skAccept, skDrop, skReturn:
+    of skAccept, skDrop, skReturn, skNotrack:
       discard
     of skReject:
       rejectType*: string
@@ -130,6 +130,10 @@ type
     of skRedirect:
       redirectPort*: int
       redirectFamily*: string
+    of skTproxy:
+      tproxyAddr*: string
+      tproxyPort*: int
+      tproxyFamily*: string
     of skVmap:
       vmapKey*: Expr
       vmapData*: Expr
@@ -145,6 +149,16 @@ type
       connLimitFlags*: string     ## "inverse" or "" for normal
     of skMssClamp:
       mssClampSize*: int          ## 0 = use "rt mtu" (PMTUD)
+    of skQueue:
+      queueNum*: int
+      queueFlags*: string         ## "bypass", "fanout", or ""
+    of skDup:
+      dupAddr*: string
+      dupDev*: string
+    of skQuota:
+      quotaVal*: int
+      quotaUnit*: string          ## "bytes", "kbytes", "mbytes"
+      quotaInv*: bool             ## true = "over" (inverse match)
     of skRaw:
       rawJson*: JsonNode          ## nftables JSON statement object
 
@@ -304,6 +318,11 @@ proc counterStmt*(name = ""): Stmt = Stmt(kind: skCounter, counterName: name)
 proc redirectStmt*(port: int, family = "ip"): Stmt = Stmt(kind: skRedirect, redirectPort: port, redirectFamily: family)
 proc connLimitStmt*(count: int, flags = ""): Stmt = Stmt(kind: skConnLimit, connLimitCount: count, connLimitFlags: flags)
 proc mssClampStmt*(size = 0): Stmt = Stmt(kind: skMssClamp, mssClampSize: size)
+proc notrackStmt*(): Stmt = Stmt(kind: skNotrack)
+proc tproxyStmt*(a: string, port: int, family = "ip"): Stmt = Stmt(kind: skTproxy, tproxyAddr: a, tproxyPort: port, tproxyFamily: family)
+proc queueStmt*(num: int, flags = ""): Stmt = Stmt(kind: skQueue, queueNum: num, queueFlags: flags)
+proc dupStmt*(a: string, dev = ""): Stmt = Stmt(kind: skDup, dupAddr: a, dupDev: dev)
+proc quotaStmt*(val: int, unit = "bytes", inv = false): Stmt = Stmt(kind: skQuota, quotaVal: val, quotaUnit: unit, quotaInv: inv)
 proc rawStmt*(j: JsonNode): Stmt = Stmt(kind: skRaw, rawJson: j)
 
 # ---------------------------------------------------------------------------

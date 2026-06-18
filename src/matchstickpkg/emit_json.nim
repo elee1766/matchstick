@@ -87,6 +87,7 @@ proc toJsonNode*(st: Stmt): JsonNode =
   of skAccept:  return %*{"accept": newJNull()}
   of skDrop:    return %*{"drop": newJNull()}
   of skReturn:  return %*{"return": newJNull()}
+  of skNotrack: return %*{"notrack": newJNull()}
   of skReject:
     var r = newJObject()
     if st.rejectType != "": r["type"] = newJString(st.rejectType)
@@ -130,6 +131,11 @@ proc toJsonNode*(st: Stmt): JsonNode =
       return %*{"masquerade": newJNull()}
   of skRedirect:
     return %*{"redirect": {"port": st.redirectPort}}
+  of skTproxy:
+    var t = %*{"family": st.tproxyFamily}
+    if st.tproxyAddr != "": t["addr"] = newJString(st.tproxyAddr)
+    if st.tproxyPort > 0: t["port"] = newJInt(st.tproxyPort)
+    return %*{"tproxy": t}
   of skVmap:
     return %*{"vmap": {
       "key": st.vmapKey.toJsonNode(),
@@ -158,6 +164,18 @@ proc toJsonNode*(st: Stmt): JsonNode =
       return %*{"mangle": {"key": {"tcp option": {"name": "maxseg", "field": "size"}}, "value": st.mssClampSize}}
     else:
       return %*{"mangle": {"key": {"tcp option": {"name": "maxseg", "field": "size"}}, "value": {"rt": {"key": "mtu"}}}}
+  of skQueue:
+    var q = %*{"num": st.queueNum}
+    if st.queueFlags != "": q["flags"] = newJString(st.queueFlags)
+    return %*{"queue": q}
+  of skDup:
+    var d = %*{"addr": st.dupAddr}
+    if st.dupDev != "": d["dev"] = newJString(st.dupDev)
+    return %*{"dup": d}
+  of skQuota:
+    var q = %*{"val": st.quotaVal, "val_unit": st.quotaUnit}
+    if st.quotaInv: q["inv"] = newJBool(true)
+    return %*{"quota": q}
   of skRaw:
     # Raw nftables JSON statement -- pass through directly
     return st.rawJson

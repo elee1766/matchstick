@@ -71,16 +71,24 @@ fw:snat({ from = &quot;10.0.0.0&#x2F;8&quot;, oif = &quot;eth0&quot;, masquerade
 cd matchstick
 make install</code></pre>
         <h2>usage</h2>
-        <pre><code>matchstick check firewall.lua       # validate
+        <pre><code># msctl manages the firewall on a running system
+msctl enable                        # compile + apply to kernel
+msctl disable                       # remove all rules
+msctl status                        # show running rules
+msctl diff                          # diff running vs config
+msctl show                          # zone policy matrix
+msctl show rules lan fw             # rules for a zone pair
+
+# matchstick is the compiler (no root, no nft needed)
+matchstick check firewall.lua       # validate
 matchstick render firewall.lua      # print nftables output
-matchstick apply firewall.lua       # apply to kernel + set sysctls
-matchstick diff firewall.lua        # diff running vs generated
-matchstick show matrix firewall.lua # zone policy matrix</code></pre>
+matchstick render --json firewall.lua
+matchstick show matrix firewall.lua</code></pre>
         <h2>migrating from ufw</h2>
-        <pre><code>sudo ufw show added | matchstick import-ufw &gt; firewall.lua
-matchstick check firewall.lua
-# edit firewall.lua to adjust zone&#x2F;host names
-matchstick apply firewall.lua</code></pre>
+        <pre><code>sudo ufw show added | matchstick import-ufw &gt; /etc/matchstick/firewall.lua
+msctl check
+# edit config to adjust zone&#x2F;host names
+msctl enable</code></pre>
       </div>
     </main>
     <footer>

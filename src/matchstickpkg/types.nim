@@ -75,6 +75,7 @@ type
     connLimit*: int            ## max concurrent connections (0 = no limit)
     rate*: Option[RateLimit]
     log*: string               ## log prefix (empty = no log)
+    comment*: string           ## rule comment (empty = none)
     line*: int
 
   # ------------------------------------------------------------------

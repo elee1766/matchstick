@@ -1162,7 +1162,7 @@ net.ipv4.tcp_syncookies = 1
 })</code></pre>
           <p>
             hooks run with the same privileges as matchstick (typically root).
-            pre_start&#x2F;post_start run during <code>matchstick apply</code>.
+            pre_start&#x2F;post_start run during <code>msctl enable</code>.
             pre_stop&#x2F;post_stop are available for init system integration.
           </p>
           <h2 id="includes">includes</h2>
@@ -1276,6 +1276,44 @@ fw:raw_nft(
             higher to run after other tools.
           </p>
           <h2 id="cli">cli</h2>
+          <p>
+            <code>msctl</code> manages the firewall on a running system.
+            <code>matchstick</code> is the compiler (no root, no nft needed).
+          </p>
+          <h3>msctl (system management)</h3>
+          <table>
+            <tbody>
+              <tr>
+                <td><code>msctl enable</code></td>
+                <td>compile, validate, apply config</td>
+              </tr>
+              <tr>
+                <td><code>msctl disable</code></td>
+                <td>remove all matchstick rules</td>
+              </tr>
+              <tr>
+                <td><code>msctl status</code></td>
+                <td>show running rules</td>
+              </tr>
+              <tr>
+                <td><code>msctl diff</code></td>
+                <td>diff running rules vs config</td>
+              </tr>
+              <tr>
+                <td><code>msctl check</code></td>
+                <td>validate config without applying</td>
+              </tr>
+              <tr>
+                <td><code>msctl edit</code></td>
+                <td>edit config, validate, and apply</td>
+              </tr>
+              <tr>
+                <td><code>msctl show [sub]</code></td>
+                <td>matrix, rules, topology, render, json, sysctl</td>
+              </tr>
+            </tbody>
+          </table>
+          <h3>matchstick (compiler)</h3>
           <table>
             <tbody>
               <tr>
@@ -1287,16 +1325,12 @@ fw:raw_nft(
                 <td>print nftables (text or --json)</td>
               </tr>
               <tr>
-                <td><code>matchstick apply config.lua</code></td>
-                <td>apply to kernel (--no-sysctl to skip)</td>
-              </tr>
-              <tr>
-                <td><code>matchstick diff config.lua</code></td>
-                <td>diff running vs generated</td>
+                <td><code>matchstick diff &lt;a&gt; &lt;b&gt;</code></td>
+                <td>diff two rulesets (- for stdin)</td>
               </tr>
               <tr>
                 <td>
-                  <code>matchstick show matrix|topology|sysctl|json</code>
+                  <code>matchstick show matrix|rules|topology|json|sysctl</code>
                 </td>
                 <td>visualize config</td>
               </tr>

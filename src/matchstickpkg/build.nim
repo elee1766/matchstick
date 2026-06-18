@@ -73,11 +73,12 @@ proc logRateRule(fam, tn, chain, setName, proto, prefix: string): NftCmd =
 type
   BuiltRule = object
     stmts: seq[Stmt]
+    comment: string
     ipv4Only, ipv6Only: bool
 
 proc buildServiceRules(state: FirewallState, svc: Service, action: Action,
                        saddrStmts, daddrStmts, extraStmts: seq[Stmt],
-                       forceV4, forceV6: bool): seq[BuiltRule] =
+                       forceV4, forceV6: bool, comment = ""): seq[BuiltRule] =
   for entry in svc.entries:
     var stmts: seq[Stmt]
     stmts.add saddrStmts
@@ -94,7 +95,7 @@ proc buildServiceRules(state: FirewallState, svc: Service, action: Action,
       stmts.add matchStmt(opEq, payloadExpr(entry.proto, "dport"), parsePortExpr(entry.port))
     stmts.add extraStmts
     stmts.add actionToStmt(action)
-    result.add BuiltRule(stmts: stmts, ipv4Only: v4, ipv6Only: v6)
+    result.add BuiltRule(stmts: stmts, comment: comment, ipv4Only: v4, ipv6Only: v6)
 
 proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
   var saddrStmts, daddrStmts, extraStmts: seq[Stmt]
@@ -149,7 +150,7 @@ proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
     extraStmts.add connLimitStmt(rule.connLimit)
 
   if rule.service.isSome:
-    return buildServiceRules(state, rule.service.get, rule.action, saddrStmts, daddrStmts, extraStmts, v4, v6)
+    return buildServiceRules(state, rule.service.get, rule.action, saddrStmts, daddrStmts, extraStmts, v4, v6, rule.comment)
 
   if rule.proto.len > 0:
     let portExpr = buildPortExpr(rule.port)
@@ -167,14 +168,14 @@ proc buildRuleExprs(state: FirewallState, rule: Rule): seq[BuiltRule] =
         if portExpr != nil: stmts.add matchStmt(opEq, payloadExpr(proto, "dport"), portExpr)
       stmts.add extraStmts
       stmts.add actionToStmt(rule.action)
-      result.add BuiltRule(stmts: stmts, ipv4Only: rv4, ipv6Only: rv6)
+      result.add BuiltRule(stmts: stmts, comment: rule.comment, ipv4Only: rv4, ipv6Only: rv6)
     return
 
   var stmts: seq[Stmt]
   stmts.add saddrStmts; stmts.add daddrStmts
   stmts.add extraStmts
   stmts.add actionToStmt(rule.action)
-  result.add BuiltRule(stmts: stmts, ipv4Only: v4, ipv6Only: v6)
+  result.add BuiltRule(stmts: stmts, comment: rule.comment, ipv4Only: v4, ipv6Only: v6)
 
 # ---------------------------------------------------------------------------
 # Zone pair analysis
@@ -302,6 +303,31 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   var defaultAction = actDrop
   for pol in state.policies:
     if pol.src.zone == nil and pol.dst.zone == nil: defaultAction = pol.action
+
+  # Build wildcard rules — rules with "*" as source or destination.
+  # These go directly in the input/output/forward chains (before vmap dispatch)
+  # so they match on any interface, not just a specific zone's interface.
+  var wildcardInput: seq[BuiltRule]   # * -> fw
+  var wildcardOutput: seq[BuiltRule]  # fw -> *
+  var wildcardForward: seq[BuiltRule] # * -> zone, zone -> *, * -> *
+  for rule in state.rules:
+    let srcWild = rule.src.zone == nil
+    let dstWild = rule.dst.zone == nil
+    if not srcWild and not dstWild: continue  # handled by zone-pair chains
+    let built = buildRuleExprs(state, rule)
+    if dstWild and not srcWild:
+      # zone -> * (outbound from a specific zone to anywhere)
+      wildcardOutput.add built
+    elif srcWild and not dstWild:
+      if rule.dst.zone == fwZone:
+        # * -> fw (inbound to firewall from any interface)
+        wildcardInput.add built
+      else:
+        # * -> zone (forward from any source to a specific zone)
+        wildcardForward.add built
+    else:
+      # * -> * — could be input or forward; put in input for "to self" semantics
+      wildcardInput.add built
 
   # Atomic table replacement:
   #   1. addTable (create if not exists — needed so delete doesn't fail on first run)
@@ -450,6 +476,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
 
   for af in addrFamilies:
     cmds.add addRule(fam, tn, "input", @[jumpStmt("icmp_v" & af.version)])
+
+  # Wildcard input rules (* -> fw): match on any interface before zone dispatch
+  for br in wildcardInput:
+    if not dualStack and br.ipv6Only: continue
+    cmds.add addRule(fam, tn, "input", br.stmts, br.comment)
+
   cmds.add addRule(fam, tn, "input", @[vmapStmt(metaExpr("iifname"), setRef("input_zones"))])
   for af in addrFamilies:
     cmds.add logRateRule(fam, tn, "input", "_lograte" & af.suffix, af.proto, logPrefix & " input DROP ")
@@ -463,6 +495,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   if state.laundry.broadcastDrop:
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("broadcast")), dropStmt()])
     cmds.add addRule(fam, tn, "forward", @[matchStmt(opEq, fibExpr("type", @["daddr"]), strExpr("multicast")), dropStmt()])
+
+  # Wildcard forward rules (* -> zone, zone -> *, * -> *)
+  for br in wildcardForward:
+    if not dualStack and br.ipv6Only: continue
+    cmds.add addRule(fam, tn, "forward", br.stmts, br.comment)
+
   cmds.add addRule(fam, tn, "forward", @[vmapStmt(concatExpr(@[metaExpr("iifname"), metaExpr("oifname")]), setRef("forward_zones"))])
   for af in addrFamilies:
     cmds.add logRateRule(fam, tn, "forward", "_lograte" & af.suffix, af.proto, logPrefix & " forward DROP ")
@@ -498,7 +536,7 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       cmds.add addChain(fam, tn, cn)
       for br in pair.builtRules:
         if not dualStack and br.ipv6Only: continue
-        cmds.add addRule(fam, tn, cn, br.stmts)
+        cmds.add addRule(fam, tn, cn, br.stmts, br.comment)
       if polLog:
         for af in addrFamilies:
           cmds.add logRateRule(fam, tn, cn, "_lograte" & af.suffix, af.proto,
@@ -519,7 +557,7 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       for br in pair.builtRules:
         if skipOther and br.ipv6Only: continue
         if not skipOther and br.ipv4Only: continue
-        cmds.add addRule(fam, tn, subCn, br.stmts)
+        cmds.add addRule(fam, tn, subCn, br.stmts, br.comment)
       if polLog:
         cmds.add logRateRule(fam, tn, subCn, "_lograte" & af.suffix, af.proto,
           logPrefix & " " & cn & " " & $polAction & " ")

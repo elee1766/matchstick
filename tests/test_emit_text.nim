@@ -125,6 +125,34 @@ suite "Stmt text: all variants":
     check "update @rl" in w.result
     check "limit rate 5/minute burst 5 packets" in w.result
 
+  test "notrack":
+    var w = newWriter(); w.emitStmt(notrackStmt())
+    check w.result == "notrack"
+  test "tproxy":
+    var w = newWriter(); w.emitStmt(tproxyStmt("127.0.0.1", 50080, "ip"))
+    check w.result == "tproxy ip to 127.0.0.1:50080"
+  test "tproxy no port":
+    var w = newWriter(); w.emitStmt(tproxyStmt("127.0.0.1", 0, "ip"))
+    check w.result == "tproxy ip to 127.0.0.1"
+  test "queue":
+    var w = newWriter(); w.emitStmt(queueStmt(0))
+    check w.result == "queue num 0"
+  test "queue with flags":
+    var w = newWriter(); w.emitStmt(queueStmt(1, "bypass"))
+    check w.result == "queue num 1 bypass"
+  test "dup":
+    var w = newWriter(); w.emitStmt(dupStmt("10.0.0.1"))
+    check w.result == "dup to 10.0.0.1"
+  test "dup with device":
+    var w = newWriter(); w.emitStmt(dupStmt("10.0.0.1", "eth0"))
+    check w.result == "dup to 10.0.0.1 device eth0"
+  test "quota":
+    var w = newWriter(); w.emitStmt(quotaStmt(1073741824, "bytes"))
+    check w.result == "quota 1073741824 bytes"
+  test "quota over":
+    var w = newWriter(); w.emitStmt(quotaStmt(1024, "mbytes", inv = true))
+    check w.result == "quota over 1024 mbytes"
+
 suite "Stmt text: match operators":
   test "match eq":
     var w = newWriter(); w.emitStmt(matchStmt(opEq, payloadExpr("tcp", "dport"), intExpr(22)))

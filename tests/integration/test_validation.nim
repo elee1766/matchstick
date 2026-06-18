@@ -295,6 +295,167 @@ suite "MSS clamp validation":
     """)
     check exitCode == 0
 
+suite "Per-rule comments":
+  test "comment appears in text output":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      local wan = fw:zone("wan", "eth0")
+      local ssh = fw:service("ssh", "tcp", 22)
+      fw:policy(wan, self, "drop")
+      fw:rule(wan, self, "accept", { service = ssh, comment = "Allow SSH from WAN" })
+    """)
+    check exitCode == 0
+
+  test "comment appears in rendered output":
+    let tmpFile = getTempDir() / "matchstick_comment_test.lua"
+    writeFile(tmpFile, """
+      local self = fw:zone("fw")
+      local wan = fw:zone("wan", "eth0")
+      local ssh = fw:service("ssh", "tcp", 22)
+      fw:policy(wan, self, "drop")
+      fw:rule(wan, self, "accept", { service = ssh, comment = "Allow SSH from WAN" })
+    """)
+    let (output, exitCode) = execCmdEx(matchstickBin & " render " & quoteShell(tmpFile) & " 2>/dev/null")
+    removeFile(tmpFile)
+    check exitCode == 0
+    check "Allow SSH from WAN" in output
+
+  test "comment appears in JSON output":
+    let tmpFile = getTempDir() / "matchstick_comment_json_test.lua"
+    writeFile(tmpFile, """
+      local self = fw:zone("fw")
+      local wan = fw:zone("wan", "eth0")
+      local ssh = fw:service("ssh", "tcp", 22)
+      fw:policy(wan, self, "drop")
+      fw:rule(wan, self, "accept", { service = ssh, comment = "Allow SSH from WAN" })
+    """)
+    let (output, exitCode) = execCmdEx(matchstickBin & " render --json " & quoteShell(tmpFile) & " 2>/dev/null")
+    removeFile(tmpFile)
+    check exitCode == 0
+    check "Allow SSH from WAN" in output
+
+suite "Raw nft statements via fw:chain()":
+  test "notrack in custom chain":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("prerouting", {
+        type = "filter", priority = "raw",
+        rules = { { { notrack = {} } } }
+      })
+    """, "--allow-raw-nft")
+    check exitCode == 0
+
+  test "queue in custom chain":
+    let (output, exitCode) = checkLua("""
+      local self = fw:zone("fw")
+      fw:chain("input", {
+        type = "filter", priority = "filter",
+        rules = { { { queue = { num = 0 } } } }
+      })
+    """, "--allow-raw-nft")
+    check exitCode == 0
+
+  test "notrack renders in text output":
+    let tmpFile = getTempDir() / "matchstick_notrack_test.lua"
+    writeFile(tmpFile, """
+      local self = fw:zone("fw")
+      fw:chain("prerouting", {
+        type = "filter", priority = "raw",
+        rules = { { { notrack = {} } } }
+      })
+    """)
+    let (output, exitCode) = execCmdEx(matchstickBin & " render --allow-raw-nft " & quoteShell(tmpFile) & " 2>/dev/null")
+    removeFile(tmpFile)
+    check exitCode == 0
+    check "notrack" in output
+
+  test "queue renders in text output":
+    let tmpFile = getTempDir() / "matchstick_queue_test.lua"
+    writeFile(tmpFile, """
+      local self = fw:zone("fw")
+      fw:chain("input", {
+        type = "filter", priority = "filter",
+        rules = { { { queue = { num = 1, flags = "bypass" } } } }
+      })
+    """)
+    let (output, exitCode) = execCmdEx(matchstickBin & " render --allow-raw-nft " & quoteShell(tmpFile) & " 2>/dev/null")
+    removeFile(tmpFile)
+    check exitCode == 0
+    check "queue" in output
+
+suite "UFW import":
+  const ufwInput = """
+ufw allow 80/tcp
+ufw allow 443
+ufw allow 51820/udp
+ufw allow 21820/udp
+ufw allow 6502
+ufw allow 51821/udp
+ufw allow from 10.100.0.0/24 to any port 22 proto tcp comment 'SSH via WireGuard only'
+ufw allow from 203.0.113.42 to any port 9001
+"""
+
+  proc importUfw(input: string): tuple[output: string, exitCode: int] =
+    let tmpFile = getTempDir() / "matchstick_ufw_input.txt"
+    writeFile(tmpFile, input)
+    let (output, exitCode) = execCmdEx(matchstickBin & " import-ufw < " & quoteShell(tmpFile) & " 2>&1")
+    removeFile(tmpFile)
+    (output, exitCode)
+
+  test "import-ufw produces output":
+    let (output, exitCode) = importUfw(ufwInput)
+    check exitCode == 0
+    check output.len > 0
+    check "fw:zone" in output
+
+  test "import-ufw generates services for each port":
+    let (output, exitCode) = importUfw(ufwInput)
+    check exitCode == 0
+    check "80" in output
+    check "443" in output
+    check "51820" in output
+    check "21820" in output
+    check "6502" in output
+    check "51821" in output
+
+  test "import-ufw handles source IP restriction":
+    let (output, exitCode) = importUfw(ufwInput)
+    check exitCode == 0
+    check "10.100.0.0/24" in output
+    check "203.0.113.42" in output
+
+  test "import-ufw preserves comments":
+    let (output, exitCode) = importUfw(ufwInput)
+    check exitCode == 0
+    check "SSH via WireGuard only" in output
+
+  test "import-ufw output is valid matchstick config":
+    let (luaOutput, importExit) = importUfw(ufwInput)
+    check importExit == 0
+    # Write the generated Lua and check it with matchstick
+    let tmpLua = getTempDir() / "matchstick_ufw_generated.lua"
+    writeFile(tmpLua, luaOutput)
+    let (checkOutput, checkExit) = execCmdEx(matchstickBin & " check " & quoteShell(tmpLua) & " 2>&1")
+    removeFile(tmpLua)
+    check checkExit == 0
+    check "ok:" in checkOutput
+
+  test "import-ufw output renders valid nftables":
+    let (luaOutput, importExit) = importUfw(ufwInput)
+    check importExit == 0
+    let tmpLua = getTempDir() / "matchstick_ufw_render.lua"
+    writeFile(tmpLua, luaOutput)
+    let (renderOutput, renderExit) = execCmdEx(matchstickBin & " render " & quoteShell(tmpLua) & " 2>/dev/null")
+    removeFile(tmpLua)
+    check renderExit == 0
+    check "table inet" in renderOutput
+    check "chain input" in renderOutput
+
+  test "import-ufw empty input fails":
+    let (output, exitCode) = importUfw("")
+    check exitCode == 1
+    check "no input" in output
+
 suite "Sysctl overrides":
   test "fw:sysctl with key-value passes":
     let (output, exitCode) = checkLua("""

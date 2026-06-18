@@ -203,7 +203,7 @@ suite "msctl show":
     else:
       let (output, ec) = msctlCmd(cfgTwoZone, "show matrix")
       check ec == 0
-      check "DROP" in output or "ACPT" in output
+      check "DROP" in output or "ACCEPT" in output
 
   test "show render":
     if not canRun: skip()

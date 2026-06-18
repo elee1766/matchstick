@@ -215,6 +215,44 @@ fw:rule(wan, self, "drop", { saddr_list = "blocked" })
 fw:rule(wan, self, "accept", { proto = "tcp", port = 80 })
 """
 
+# Allowlist with CIDR: only trusted subnet gets access (wireguard-style)
+const cfgIpListAllow = """
+local ssh = fw:service("ssh", "tcp", 22)
+local self = fw:zone("fw")
+local wan = fw:zone("wan", "eth0")
+
+fw:iplist("wg_peers", {
+  type = "ipv4",
+  flags = "interval",
+  elements = { "10.0.0.0/28" },
+})
+
+fw:policy(wan, self, "drop")
+fw:rule(wan, self, "accept", { service = ssh, saddr_list = "wg_peers" })
+fw:rule(wan, self, "accept", { proto = "tcp", port = 80 })
+"""
+
+# daddr_list: only allow traffic to whitelisted destinations
+const cfgDaddrList = """
+local http = fw:service("http", "tcp", 80)
+local self = fw:zone("fw")
+local wan = fw:zone("wan", "eth0")
+local lan = fw:zone("lan", "eth1")
+
+fw:iplist("allowed_dests", {
+  type = "ipv4",
+  flags = "interval",
+  elements = { "192.168.1.0/24" },
+})
+
+fw:policy(lan, wan, "drop")
+fw:policy("*", "*", "reject")
+
+fw:rule(lan, wan, "accept", { service = http, daddr_list = "allowed_dests" })
+
+fw:snat({ from = "10.0.0.0/24", oif = "eth0", masquerade = true })
+"""
+
 const cfgMultiIface = """
 local ssh = fw:service("ssh", "tcp", 22)
 local self = fw:zone("fw")
@@ -431,6 +469,72 @@ suite "probe: IP list / saddr_list":
         # Normal source: port 80 accepted
         checkAllPass runInputProbes(text, "eth0", "10.0.0.1/24", "10.0.0.2/24",
           @[80], @[Probe(port: 80, expect: pvAccept)])
+
+suite "probe: IP list allowlist (wireguard-style)":
+  test "trusted CIDR gets SSH, untrusted does not":
+    if not canProbe: skip()
+    else:
+      let (text, ok) = renderConfig(cfgIpListAllow)
+      check ok
+      if ok:
+        # 10.0.0.5 is inside 10.0.0.0/28 (wg_peers): SSH accepted, HTTP accepted
+        checkAllPass runInputProbes(text, "eth0", "10.0.0.1/24", "10.0.0.5/24",
+          @[22, 80, 443],
+          @[Probe(port: 22, expect: pvAccept),
+            Probe(port: 80, expect: pvAccept),
+            Probe(port: 443, expect: pvDrop)])
+
+  test "IP outside trusted CIDR is denied SSH":
+    if not canProbe: skip()
+    else:
+      let (text, ok) = renderConfig(cfgIpListAllow)
+      check ok
+      if ok:
+        # 10.0.0.50 is outside 10.0.0.0/28: SSH dropped (not in allowlist),
+        # HTTP still accepted (no saddr_list on that rule)
+        checkAllPass runInputProbes(text, "eth0", "10.0.0.1/24", "10.0.0.50/24",
+          @[22, 80],
+          @[Probe(port: 22, expect: pvDrop),
+            Probe(port: 80, expect: pvAccept)])
+
+  test "IP at boundary of CIDR range":
+    if not canProbe: skip()
+    else:
+      let (text, ok) = renderConfig(cfgIpListAllow)
+      check ok
+      if ok:
+        # 10.0.0.15 is the last address in 10.0.0.0/28: should be accepted
+        checkAllPass runInputProbes(text, "eth0", "10.0.0.1/24", "10.0.0.15/24",
+          @[22], @[Probe(port: 22, expect: pvAccept)])
+        # 10.0.0.16 is just outside 10.0.0.0/28: should be dropped
+        checkAllPass runInputProbes(text, "eth0", "10.0.0.1/24", "10.0.0.16/24",
+          @[22], @[Probe(port: 22, expect: pvDrop)])
+
+suite "probe: daddr_list (destination filtering)":
+  test "traffic to allowed destination passes, others blocked":
+    if not canProbe: skip()
+    else:
+      let (text, ok) = renderConfig(cfgDaddrList)
+      check ok
+      if ok:
+        # Forward to 192.168.1.2 (in allowed_dests 192.168.1.0/24): accepted
+        checkAllPass runForwardProbes(text,
+          "eth1", "10.0.0.1/24", "10.0.0.2/24",
+          "eth0", "192.168.1.1/24", "192.168.1.2/24", 80,
+          @[ForwardProbe(destIp: "192.168.1.2", destPort: 80, expectSrcIp: "192.168.1.1")])
+
+  test "traffic to disallowed destination is blocked":
+    if not canProbe: skip()
+    else:
+      # Need a server outside the allowed range. Use 172.16.0.0/24 which is NOT
+      # in the allowed_dests (192.168.1.0/24).
+      let (text, ok) = renderConfig(cfgDaddrList)
+      check ok
+      if ok:
+        checkAllPass runForwardProbes(text,
+          "eth1", "10.0.0.1/24", "10.0.0.2/24",
+          "eth0", "172.16.0.1/24", "172.16.0.10/24", 80,
+          @[ForwardProbe(destIp: "172.16.0.10", destPort: 80, expectBlocked: true)])
 
 suite "probe: multiple interfaces per zone":
   test "both interfaces get same rules":

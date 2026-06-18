@@ -139,6 +139,37 @@ suite "Stmt JSON: all variants":
     let j = s.toJsonNode()
     check j["set"]["op"].getStr == "update"
     check j["set"]["set"].getStr == "@rl"
+  test "notrack": check notrackStmt().toJsonNode().hasKey("notrack")
+  test "tproxy":
+    let j = tproxyStmt("127.0.0.1", 50080, "ip").toJsonNode()
+    check j["tproxy"]["addr"].getStr == "127.0.0.1"
+    check j["tproxy"]["port"].getInt == 50080
+    check j["tproxy"]["family"].getStr == "ip"
+  test "tproxy no port":
+    let j = tproxyStmt("127.0.0.1", 0, "ip").toJsonNode()
+    check not j["tproxy"].hasKey("port")
+  test "queue":
+    let j = queueStmt(0).toJsonNode()
+    check j["queue"]["num"].getInt == 0
+    check not j["queue"].hasKey("flags")
+  test "queue with flags":
+    let j = queueStmt(1, "bypass").toJsonNode()
+    check j["queue"]["flags"].getStr == "bypass"
+  test "dup":
+    let j = dupStmt("10.0.0.1").toJsonNode()
+    check j["dup"]["addr"].getStr == "10.0.0.1"
+    check not j["dup"].hasKey("dev")
+  test "dup with device":
+    let j = dupStmt("10.0.0.1", "eth0").toJsonNode()
+    check j["dup"]["dev"].getStr == "eth0"
+  test "quota":
+    let j = quotaStmt(1073741824, "bytes").toJsonNode()
+    check j["quota"]["val"].getInt == 1073741824
+    check j["quota"]["val_unit"].getStr == "bytes"
+    check not j["quota"].hasKey("inv")
+  test "quota over":
+    let j = quotaStmt(1024, "mbytes", inv = true).toJsonNode()
+    check j["quota"]["inv"].getBool == true
   test "match eq":
     let j = matchStmt(opEq, payloadExpr("tcp", "dport"), intExpr(22)).toJsonNode()
     check j["match"]["op"].getStr == "=="

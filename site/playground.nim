@@ -2,7 +2,7 @@
 ## Exports loadAndRender() callable from JS via Module.ccall.
 
 import std/[json, tables, sequtils, strutils]
-import ../src/lua54/sandbox
+import ../src/lua55/sandbox
 import ../src/matchstickpkg/types
 import ../src/matchstickpkg/build
 import ../src/matchstickpkg/emit_text

@@ -3,7 +3,7 @@
 ## Each method is a LuaCFunction that retrieves FirewallState from the
 ## Lua registry and operates on it. setupLuaVM registers them all.
 
-import std/[os, options, tables, json, strutils]
+import std/[os, options, tables, json, strutils, algorithm]
 import ../../lua55/ffi
 import ./helpers
 import ../types
@@ -353,6 +353,10 @@ proc fwRule(L: LuaState): cint {.cdecl.} =
           rule.daddrRaw = state.hosts[rawDaddr].addr4
         else:
           rule.daddrRaw = rawDaddr
+
+      rule.comment = getStringField(L, 5, "comment")
+      if rule.comment != "":
+        checkLen(L, rule.comment, maxStringLen, "fw:rule comment")
 
       # Rate limit
       discard lua_getfield(L, 5, "rate")
@@ -831,76 +835,97 @@ proc fwException(L: LuaState): cint {.cdecl.} =
 
 const maxIncludeDepth = 8  # Each level uses ~10 Lua C stack slots; keep well under LUAI_MAXCSTACK
 
-proc fwInclude(L: LuaState): cint {.cdecl.} =
-  let state = getState(L)
-  let path = $luaL_checkstring(L, 2)
-
-  checkLen(L, path, maxStringLen, "fw:include path")
-
-  # Reject absolute paths — includes must be relative to the config directory
-  if path.isAbsolute:
-    discard luaL_error(L, "fw:include: absolute paths are not allowed: '%s'", path.cstring)
-
-  # Reject path traversal components
-  for component in path.split({'/', '\\'}):
-    if component == "..":
-      discard luaL_error(L, "fw:include: '..' path traversal is not allowed: '%s'", path.cstring)
-
-  # Enforce include depth limit to prevent stack overflow
+proc includeOneFile(L: LuaState, state: FirewallState, fullPath: string) =
+  ## Load and execute a single Lua file. Handles depth limit, duplicate
+  ## detection, config dir switching, and frame state safety.
   if state.includedFiles.len >= maxIncludeDepth:
     discard luaL_error(L, "fw:include: maximum include depth (%d) exceeded", maxIncludeDepth.cint)
 
-  # Resolve relative to the current config file's directory
-  let configDir = getConfigDir(L)
-  let fullPath = absolutePath(configDir / path)
-
-  # Verify the resolved path stays within the original config's directory tree.
-  # Use expandFilename (realpath) to resolve symlinks, preventing symlink-based
-  # directory escape (CVE-2004-0647 / CVE-2008-4956 class).
-  let configRoot = if state.includedFiles.len > 0:
-                     state.includedFiles[0].parentDir
-                   else:
-                     configDir
-  let normalRoot = try: expandFilename(absolutePath(configRoot))
-                   except OSError: absolutePath(configRoot)
-  let resolvedPath = try: expandFilename(fullPath)
-                     except OSError: fullPath
-  if not resolvedPath.startsWith(normalRoot & "/") and resolvedPath != normalRoot:
-    discard luaL_error(L, "fw:include: resolved path escapes config directory: '%s'", resolvedPath.cstring)
-
-  if not fileExists(fullPath):
-    discard luaL_error(L, "fw:include: file not found: '%s'", fullPath.cstring)
-
-  # Check for duplicate includes
   if fullPath in state.includedFiles:
     state.warnings.add "warning: file already included: " & fullPath
   state.includedFiles.add fullPath
 
-  # Save current config dir, set new one
-  let prevDir = configDir
+  let prevDir = getConfigDir(L)
   setConfigDir(L, fullPath.parentDir)
 
-  # Record stack top before loading so we can count return values correctly
-  let base = lua_gettop(L)
-
-  # Load and execute the file
   var status = luaL_loadfile(L, fullPath.cstring)
   if status != LUA_OK:
     discard luaL_error(L, "fw:include: %s", lua_tostring(L, -1))
 
-  # Save/restore Nim's frame state around lua_pcall. If the included file
-  # errors, lua_pcall's longjmp corrupts Nim's TFrame chain. We restore it
-  # so the subsequent luaL_error (which also longjmps) doesn't crash.
   let savedFrameState = getFrameState()
   status = lua_pcall(L, 0, LUA_MULTRET, 0)
   setFrameState(savedFrameState)
   if status != LUA_OK:
     discard luaL_error(L, "fw:include: %s", lua_tostring(L, -1))
 
-  # Restore previous config dir
   setConfigDir(L, prevDir)
 
-  # Return only values pushed by the included file (not our arguments)
+proc resolveIncludePath(L: LuaState, state: FirewallState, path, configDir: string): string =
+  ## Resolve and validate an include path. Returns the absolute path.
+  let fullPath = absolutePath(configDir / path)
+  let configRoot = if state.includedFiles.len > 0:
+                     state.includedFiles[0].parentDir
+                   else: configDir
+  let normalRoot = try: expandFilename(absolutePath(configRoot))
+                   except OSError: absolutePath(configRoot)
+  let resolvedPath = try: expandFilename(fullPath)
+                     except OSError: fullPath
+  if not resolvedPath.startsWith(normalRoot & "/") and resolvedPath != normalRoot:
+    discard luaL_error(L, "fw:include: resolved path escapes config directory: '%s'", resolvedPath.cstring)
+  return fullPath
+
+proc fwInclude(L: LuaState): cint {.cdecl.} =
+  let state = getState(L)
+  let path = $luaL_checkstring(L, 2)
+
+  checkLen(L, path, maxStringLen, "fw:include path")
+
+  if path.isAbsolute:
+    discard luaL_error(L, "fw:include: absolute paths are not allowed: '%s'", path.cstring)
+  for component in path.split({'/', '\\'}):
+    if component == "..":
+      discard luaL_error(L, "fw:include: '..' path traversal is not allowed: '%s'", path.cstring)
+
+  let configDir = getConfigDir(L)
+  let base = lua_gettop(L)
+  let isGlob = '*' in path or '?' in path or '[' in path
+
+  if isGlob:
+    # Glob include: match files, sort alphabetically, skip dotfiles.
+    # No matches is not an error (like Shorewall).
+    let dir = absolutePath(configDir / path.parentDir)
+    let pattern = path.extractFilename
+    var matches: seq[string]
+    if dirExists(dir):
+      for kind, p in walkDir(dir):
+        if kind != pcFile: continue
+        let name = p.extractFilename
+        if name.startsWith("."): continue  # skip dotfiles
+        # Simple glob matching
+        var match = true
+        var si, pi = 0
+        while pi < pattern.len and si < name.len:
+          if pattern[pi] == '*':
+            if pi + 1 >= pattern.len: si = name.len; break
+            pi += 1
+            while si < name.len and name[si] != pattern[pi]: si += 1
+          elif pattern[pi] == '?' or pattern[pi] == name[si]:
+            pi += 1; si += 1
+          else:
+            match = false; break
+        if pi < pattern.len and pattern[pi] != '*': match = false
+        if match: matches.add p
+    matches.sort()
+    for m in matches:
+      discard resolveIncludePath(L, state, m.relativePath(configDir), configDir)
+      includeOneFile(L, state, m)
+  else:
+    # Single file include
+    let fullPath = resolveIncludePath(L, state, path, configDir)
+    if not fileExists(fullPath):
+      discard luaL_error(L, "fw:include: file not found: '%s'", fullPath.cstring)
+    includeOneFile(L, state, fullPath)
+
   return lua_gettop(L) - base
 
 # ---------------------------------------------------------------------------

@@ -121,9 +121,9 @@ suite "Show commands":
   test "show matrix":
     let (output, exitCode) = runMatchstick("show", "matrix", testConfig)
     check exitCode == 0
-    check "ACPT" in output
+    check "ACCEPT" in output
     check "DROP" in output
-    check "REJ" in output
+    check "REJECT" in output
 
   test "show rules wan->fw":
     let (output, exitCode) = runMatchstick("show", "rules", testConfig, "wan", "fw")

@@ -177,15 +177,12 @@ proc parseCli(): CliOpts =
     else:
       result.configFile = ""
   else:
-    # Find config file among remaining positionals
-    for i, arg in rest:
-      if result.configFile == "" and fileExists(arg):
-        result.configFile = arg
-      else:
-        result.extraArgs.add arg
-
-    # Fall back to default config paths
-    if result.configFile == "":
+    # First positional after command is the config file path
+    if rest.len > 0:
+      result.configFile = rest[0]
+      result.extraArgs = rest[1..^1]
+    else:
+      # Fall back to default config paths
       result.configFile = findConfig()
 
 proc requireConfig(opts: CliOpts) =

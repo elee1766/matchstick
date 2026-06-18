@@ -69,4 +69,4 @@ jobs:
 
           echo "--- apply via msctl in netns ---"
           unshare --user --net --map-root-user -- \
-            sh -c 'MATCHSTICK=./matchstick ./msctl enable 2>&1'
+            sh -c 'MATCHSTICK=./matchstick MATCHSTICK_CONFIG=tests/testdata/full.lua ./msctl enable 2>&1'
