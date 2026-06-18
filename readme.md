@@ -63,45 +63,39 @@ fw:snat({ from = "10.0.0.0/8", oif = "eth0", masquerade = true })
 
 ## Usage
 
+matchstick is the nftables compiler and holds the core logic
+
+msctl is the firewall tool which uses matchstick to interface with nft cli on a running system. it's just a wrapper script around matchstick
+
+if you are using it to manage stuff on your machine, you would use msctl. if you are using it to create rules to use elsewhere, you would use matchstick
+
+### msctl (system management)
+
+```sh
+msctl enable        # compile, validate, apply config to kernel
+msctl disable       # remove all matchstick rules
+msctl status        # show running rules
+msctl diff          # diff running rules vs config
+msctl check         # validate config without applying
+msctl edit          # edit config, validate, and apply
+msctl show          # zone policy matrix (default)
+msctl show rules lan fw    # rules for a zone pair
+msctl show topology        # ASCII topology diagram
+msctl show render          # print nftables text
+```
+
+### matchstick (compiler)
+
 ```sh
 matchstick check  firewall.lua           # validate config
 matchstick render firewall.lua           # print nftables text
 matchstick render --json firewall.lua    # print nftables JSON
-matchstick apply  firewall.lua           # apply to kernel (root)
-
-# diff two rulesets (.lua files are rendered, - is stdin)
-matchstick diff old.lua new.lua
-matchstick diff firewall.lua saved.nft
-
-# check if running rules match config
-nft list table inet matchstick | matchstick diff firewall.lua -
-
-# view running rules directly
-nft list table inet matchstick
-
-matchstick show matrix   firewall.lua              # zone policy matrix
-matchstick show rules    firewall.lua wan fw        # rules for a zone pair
-matchstick show topology firewall.lua               # ASCII topology
-matchstick show topology firewall.lua --format=dot  # Graphviz DOT
-matchstick show topology firewall.lua --format=d2   # D2 diagram
-matchstick show json     firewall.lua               # full state as JSON
+matchstick diff old.lua new.lua          # diff two rulesets
+matchstick show matrix firewall.lua      # zone policy grid
+matchstick show rules  firewall.lua wan fw
+matchstick show topology firewall.lua --format=dot
+matchstick import-ufw                    # convert UFW rules from stdin
 ```
-
-### msctl
-
-`msctl` is a shell wrapper for day-to-day firewall management. It combines
-`matchstick` (the compiler) with `nft` (the runtime):
-
-```sh
-msctl status        # show running rules (nft list table)
-msctl diff          # diff running rules vs /etc/matchstick/firewall.lua
-msctl check         # validate config
-msctl apply         # apply config to kernel
-msctl flush         # remove all matchstick rules
-msctl edit          # edit config, validate, apply (uses $EDITOR)
-```
-
-Installed alongside matchstick via `make install`.
 
 By default, configs run in a restricted Lua environment without `os`, `io`,
 `package`, `debug`, `dofile`, or `loadfile`, and dangerous escape hatches are
@@ -110,8 +104,8 @@ overrides, so production configs should be fully trusted and root-owned. Use
 these escape hatches only for trusted configs:
 
 ```sh
-matchstick apply --allow-hooks firewall.lua          # allow fw:hook shell commands
-matchstick apply --allow-raw-nft firewall.lua        # allow fw:chain/fw:raw_nft
+matchstick render --allow-hooks firewall.lua          # allow fw:hook shell commands
+matchstick render --allow-raw-nft firewall.lua        # allow fw:chain/fw:raw_nft
 ```
 
 ## Build
@@ -120,12 +114,11 @@ matchstick apply --allow-raw-nft firewall.lua        # allow fw:chain/fw:raw_nft
 nimble build
 ```
 
-Requires Nim >= 2.2. Lua 5.4 is vendored and compiled from C sources -- no external dependency.
+Requires Nim >= 2.2. Lua is vendored and compiled from C sources -- no external dependency.
 
-The binary runs anywhere with just libc. The `nft` binary is only needed
-for `apply` (to load rules into the kernel). All other commands (`check`,
-`render`, `diff`, `show`) are pure computation with no runtime dependencies.
-Install `nftables` on the target system for `apply`.
+The `matchstick` binary is pure computation — no root, no nft, no runtime
+dependencies. `msctl` requires `nft` (nftables) on the target system to
+apply rules to the kernel.
 
 ## Configuration
 

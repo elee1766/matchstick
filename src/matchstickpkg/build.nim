@@ -303,7 +303,12 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   for pol in state.policies:
     if pol.src.zone == nil and pol.dst.zone == nil: defaultAction = pol.action
 
-  # Table
+  # Atomic table replacement:
+  #   1. addTable (create if not exists — needed so delete doesn't fail on first run)
+  #   2. deleteTable (remove all contents)
+  #   3. addTable (re-create empty, then chains/sets/rules fill it)
+  cmds.add addTable(fam, tn)
+  cmds.add deleteTable(fam, tn)
   cmds.add addTable(fam, tn)
 
   # IP list sets
@@ -524,6 +529,8 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
   if state.dnatRules.len > 0 or state.snatRules.len > 0 or state.redirectRules.len > 0:
     let natTn = tn & "_nat"
     cmds.add addTable(fam, natTn)
+    cmds.add deleteTable(fam, natTn)
+    cmds.add addTable(fam, natTn)
 
     if state.dnatRules.len > 0 or state.redirectRules.len > 0:
       cmds.add addBaseChain(fam, natTn, "prerouting", "nat", "prerouting", priorityVal(-100, offset), "accept")
@@ -601,21 +608,46 @@ proc buildRuleset*(state: FirewallState): NftRuleset =
       if cmd.kind == nckAdd and cmd.add.kind == nakRule:
         cmd.add.rule.expr.insert(counterStmt(), 0)
 
-  # Reorder: nftables requires objects to be defined before they're referenced.
-  # Ordering: metainfo → deletes → tables → chains → sets/maps → raw → rules.
-  # Uses a sort key so new NftCmd/NftAdd kinds cause compile errors, not silent drops.
-  proc cmdSortKey(c: NftCmd): int =
+  # Reorder: nftables requires objects in dependency order, and atomic
+  # replacement needs addTable→deleteTable→addTable before any chains/sets/rules.
+  # Uses exhaustive case so new NftCmd/NftAdd kinds cause compile errors.
+  proc cmdPhase(c: NftCmd): int =
     case c.kind
-    of nckMetainfo: 0
+    of nckMetainfo: 0  # unused, added separately
     of nckDelete:   1
     of nckAdd:
       case c.add.kind
-      of nakTable:    2
-      of nakChain:    3
+      of nakTable:  2
+      of nakChain:  3
       of nakSet, nakMap: 4
-      of nakRule:     6
+      of nakRule:   6
     of nckRaw:      5
 
-  cmds.insert(metainfoCmd(), 0)
-  cmds.sort(proc(a, b: NftCmd): int = cmp(cmdSortKey(a), cmdSortKey(b)))
-  result = NftRuleset(nftables: cmds)
+  var ordered: seq[NftCmd]
+  ordered.add metainfoCmd()
+  # Phase 0: first addTable per table (create if not exists)
+  var seenTables: seq[string]
+  for c in cmds:
+    if c.kind == nckAdd and c.add.kind == nakTable:
+      let id = c.add.table.family & " " & c.add.table.name
+      if id notin seenTables:
+        seenTables.add id
+        ordered.add c
+  # Phase 1: deletes (clear table contents)
+  for c in cmds:
+    if c.kind == nckDelete: ordered.add c
+  # Phase 2: second addTable (re-create after delete)
+  seenTables = @[]
+  for c in cmds:
+    if c.kind == nckAdd and c.add.kind == nakTable:
+      let id = c.add.table.family & " " & c.add.table.name
+      if id notin seenTables:
+        seenTables.add id
+      else:
+        ordered.add c
+  # Phase 3-6: chains, sets/maps, raw, rules
+  for phase in 3..6:
+    for c in cmds:
+      if cmdPhase(c) == phase: ordered.add c
+
+  result = NftRuleset(nftables: ordered)

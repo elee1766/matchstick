@@ -67,6 +67,6 @@ jobs:
           unshare --user --net --map-root-user -- \
             sh -c './matchstick render --json tests/testdata/full.lua 2>/dev/null | nft -j -c -f -'
 
-          echo "--- apply in netns ---"
+          echo "--- apply via msctl in netns ---"
           unshare --user --net --map-root-user -- \
-            sh -c './matchstick apply tests/testdata/full.lua 2>&1'
+            sh -c 'MATCHSTICK=./matchstick ./msctl enable 2>&1'

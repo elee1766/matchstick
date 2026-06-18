@@ -380,10 +380,11 @@ proc emitText*(rs: NftRuleset): string =
     let (fam, name) = key
     let tblId = fam & " " & name
 
+    # Atomic replacement: create table (if not exists), delete it (removes
+    # all contents), then re-create with the full ruleset in one `nft -f` load.
     w.line("table " & tblId)
     w.line("delete table " & tblId)
     w.emptyLine()
-
     w.braced("table " & tblId):
       # Raw nftables JSON commands (injected via fw:raw_nft)
       let raws = rawJsonCmds.getOrDefault(key, @[])

@@ -32,50 +32,95 @@ proc showMatrix*(state: FirewallState): string =
     if pol.src.zone == nil or pol.dst.zone == nil: continue
     policyMap[(pol.src.zone.name, pol.dst.zone.name)] = (pol.action, pol.log)
 
-  var ruleCount: Table[ZPKey, int]
+  # Collect service/port summaries per zone pair
+  var ruleSummary: Table[ZPKey, seq[string]]
   for rule in state.rules:
     if rule.src.zone == nil or rule.dst.zone == nil: continue
     let key: ZPKey = (rule.src.zone.name, rule.dst.zone.name)
-    ruleCount[key] = ruleCount.getOrDefault(key, 0) + 1
+    if key notin ruleSummary: ruleSummary[key] = @[]
+    if rule.service.isSome:
+      let name = rule.service.get.name
+      if name notin ruleSummary[key]:
+        ruleSummary[key].add name
+    elif rule.proto.len > 0:
+      let desc = rule.proto[0] & (if rule.port.len > 0: "/" & rule.port[0] else: "")
+      if desc notin ruleSummary[key]:
+        ruleSummary[key].add desc
 
-  let colW = max(10, zoneNames.mapIt(it.len).max + 2)
+  # Build cell contents: each cell is a seq of lines (policy line + service lines)
+  let n = zoneNames.len
+  type Cell = seq[string]  # lines within a cell
+  var grid: seq[seq[Cell]]  # rows of cells
 
-  # Header
-  w.add "  " & "src \\ dst".alignLeft(colW)
-  for dst in zoneNames:
-    w.add dst.alignLeft(colW)
-  w.emptyLine()
-  w.add "  " & "-".repeat(colW)
-  for dst in zoneNames:
-    w.add "-".repeat(colW)
-  w.emptyLine()
+  # Header row
+  var header: seq[Cell]
+  header.add @["src \\ dst"]
+  for dst in zoneNames: header.add @[dst]
+  grid.add header
 
-  # Rows
-  for src in zoneNames:
-    w.add "  " & src.alignLeft(colW)
-    for dst in zoneNames:
+  # Data rows
+  for si, src in zoneNames:
+    var row: seq[Cell]
+    row.add @[src]
+    for di, dst in zoneNames:
       if src == dst:
-        w.add "--".alignLeft(colW)
+        row.add @["--"]
         continue
       let key: ZPKey = (src, dst)
-      let rc = ruleCount.getOrDefault(key, 0)
+      var lines: seq[string]
+      # Policy line
+      var pol = ""
       if key in policyMap:
         let (action, logged) = policyMap[key]
-        var cell = case action
-          of actAccept: "ACPT"
+        pol = case action
+          of actAccept: "ACCEPT"
           of actDrop: "DROP"
-          of actReject: "REJ"
-        if logged: cell = "* " & cell
-        if rc > 0: cell &= " " & $rc & "r"
-        w.add cell.alignLeft(colW)
+          of actReject: "REJECT"
+        if logged: pol &= "*"
       else:
-        var cell = "drop"
-        if rc > 0: cell = $rc & "r"
-        w.add cell.alignLeft(colW)
+        pol = "drop"
+      lines.add pol
+      # Service lines
+      if key in ruleSummary:
+        for svc in ruleSummary[key]:
+          lines.add svc
+      row.add lines
+    grid.add row
+
+  # Compute column widths from widest line in each cell
+  var colWidths = newSeq[int](n + 1)
+  for row in grid:
+    for ci, cell in row:
+      for line in cell:
+        if line.len > colWidths[ci]: colWidths[ci] = line.len
+
+  # Render with multi-line cells
+  proc renderSep(w: var Writer, colWidths: seq[int]) =
+    w.add "  "
+    for ci, cw in colWidths:
+      if ci > 0: w.add "-+-"
+      w.add "-".repeat(cw)
     w.emptyLine()
 
+  for ri, row in grid:
+    # Find max height of any cell in this row
+    var height = 1
+    for cell in row:
+      if cell.len > height: height = cell.len
+
+    for lineIdx in 0 ..< height:
+      w.add "  "
+      for ci, cell in row:
+        if ci > 0: w.add " | "
+        let text = if lineIdx < cell.len: cell[lineIdx] else: ""
+        w.add text.alignLeft(colWidths[ci])
+      w.emptyLine()
+
+    if ri == 0:
+      w.renderSep(colWidths)
+
   w.emptyLine()
-  w.line "  ACPT=accept  DROP=drop  REJ=reject  *=logged  Nr=N rules"
+  w.line "  * = logged"
   return w.result
 
 # ---------------------------------------------------------------------------

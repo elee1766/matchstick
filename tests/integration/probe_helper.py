@@ -191,13 +191,23 @@ def run_input(ruleset, spec):
     # --- parent: firewall host ---
     os.system(f"ip link set _ms_probe_peer netns {pid}")
 
-    tmp_nft = "/tmp/_ms_probe_ruleset.nft"
-    with open(tmp_nft, "w") as f:
-        f.write(ruleset)
-    ret = os.system(f"nft -f {tmp_nft} 2>&1")
-    os.unlink(tmp_nft)
+    apply_cmd = spec.get("apply_cmd")
+    if apply_cmd:
+        # Custom apply command (e.g. msctl enable). Ruleset file is
+        # still written so the command can reference it if needed.
+        tmp_nft = "/tmp/_ms_probe_ruleset.nft"
+        with open(tmp_nft, "w") as f:
+            f.write(ruleset)
+        ret = os.system(f"{apply_cmd} >/dev/null 2>&1")
+        os.unlink(tmp_nft)
+    else:
+        tmp_nft = "/tmp/_ms_probe_ruleset.nft"
+        with open(tmp_nft, "w") as f:
+            f.write(ruleset)
+        ret = os.system(f"nft -f {tmp_nft} 2>&1")
+        os.unlink(tmp_nft)
     if ret != 0:
-        print(json.dumps({"ok": False, "error": "nft -f failed"}))
+        print(json.dumps({"ok": False, "error": "apply failed"}))
         os.write(sync_w, b"G")
         os.waitpid(pid, 0)
         sys.exit(1)
@@ -344,13 +354,21 @@ def run_forward(ruleset, spec):
     os.system(f"ip link set _ms_wan_peer netns {pid_srv}")
     os.system(f"ip link set _ms_lan_peer netns {pid_cli}")
 
-    tmp_nft = "/tmp/_ms_probe_ruleset.nft"
-    with open(tmp_nft, "w") as f:
-        f.write(ruleset)
-    ret = os.system(f"nft -f {tmp_nft} 2>&1")
-    os.unlink(tmp_nft)
+    apply_cmd = spec.get("apply_cmd")
+    if apply_cmd:
+        tmp_nft = "/tmp/_ms_probe_ruleset.nft"
+        with open(tmp_nft, "w") as f:
+            f.write(ruleset)
+        ret = os.system(f"{apply_cmd} >/dev/null 2>&1")
+        os.unlink(tmp_nft)
+    else:
+        tmp_nft = "/tmp/_ms_probe_ruleset.nft"
+        with open(tmp_nft, "w") as f:
+            f.write(ruleset)
+        ret = os.system(f"nft -f {tmp_nft} 2>&1")
+        os.unlink(tmp_nft)
     if ret != 0:
-        print(json.dumps({"ok": False, "error": "nft -f failed"}))
+        print(json.dumps({"ok": False, "error": "apply failed"}))
         os.write(srv_sync_w, b"G")
         os.write(cli_sync_w, b"G")
         os.waitpid(pid_srv, 0)

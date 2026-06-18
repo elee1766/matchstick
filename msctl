@@ -1,10 +1,7 @@
 #!/bin/sh
-# msctl — operator wrapper for matchstick firewall management.
-# Combines matchstick (the compiler) with nft (the runtime) for
+# msctl — matchstick firewall control.
+# Wraps matchstick (the compiler) and nft (the runtime) for
 # day-to-day firewall operations.
-#
-# Install alongside matchstick:
-#   install -m 755 contrib/msctl /usr/local/bin/msctl
 
 set -e
 
@@ -18,21 +15,28 @@ usage() {
     cat >&2 <<EOF
 msctl — matchstick firewall control
 
+Usage: msctl <command> [args]
+
 Commands:
-  status              Show running rules
-  diff                Diff running rules vs config
-  check               Validate config
-  apply               Apply config to kernel
-  reload              Same as apply
-  flush               Remove all matchstick rules
-  edit                Edit config, validate, and apply
-  render              Print what would be applied
-  version             Show matchstick version
+  enable                Apply config (alias: start, apply, reload)
+  disable               Remove all matchstick rules (alias: stop)
+  status                Show running rules
+  check                 Validate config without applying
+  diff                  Diff running rules vs config
+  edit                  Edit config, validate, and apply
+  show [sub]            Visualize config:
+    matrix                Zone policy grid
+    rules <src> <dst>     Rules for a zone pair
+    topology [format]     Diagram (ascii, dot, d2, mermaid)
+    render                Print nftables text that would be applied
+    json                  Full state as JSON
+    sysctl                Derived sysctl settings
+  version               Print build info
 
 Environment:
-  MATCHSTICK_CONFIG   Config file (default: $CONFIG)
-  MATCHSTICK_TABLE    Table name (default: $TABLE)
-  EDITOR              Editor for 'edit' command (default: vi)
+  MATCHSTICK_CONFIG     Config file (default: $CONFIG)
+  MATCHSTICK_TABLE      Table name (default: $TABLE)
+  EDITOR                Editor for 'edit' (default: vi)
 EOF
     exit 1
 }
@@ -58,15 +62,77 @@ require_config() {
     fi
 }
 
+cmd_enable() {
+    require_root
+    require_config
+    require_nft
+
+    # Validate config
+    echo "checking config..." >&2
+    "$MATCHSTICK" check "$CONFIG" >/dev/null
+
+    # Apply sysctls
+    local sysctls
+    sysctls=$("$MATCHSTICK" show sysctl "$CONFIG" 2>/dev/null)
+    if [ -n "$sysctls" ]; then
+        echo "applying sysctls..." >&2
+        echo "$sysctls" | while IFS='= ' read -r key value; do
+            [ -z "$key" ] && continue
+            local path="/proc/sys/$(echo "$key" | tr '.' '/')"
+            if [ -w "$path" ]; then
+                echo "$value" > "$path" 2>/dev/null || \
+                    echo "warning: sysctl $key: failed" >&2
+            fi
+        done
+    fi
+
+    # Render and apply atomically via nft
+    echo "applying rules..." >&2
+    local json
+    json=$("$MATCHSTICK" render --json "$CONFIG" 2>/dev/null)
+    if [ -z "$json" ]; then
+        echo "error: render failed" >&2
+        exit 1
+    fi
+
+    # Validate first (dry-run)
+    echo "$json" | $NFT -j -c -f - || {
+        echo "error: nftables validation failed" >&2
+        exit 1
+    }
+
+    # Apply
+    echo "$json" | $NFT -j -f - || {
+        echo "error: nftables apply failed" >&2
+        exit 1
+    }
+
+    echo "ok: rules applied"
+}
+
+cmd_disable() {
+    require_root
+    require_nft
+    $NFT delete table "$FAMILY" "$TABLE" 2>/dev/null && \
+        echo "deleted table $FAMILY $TABLE" || \
+        echo "table $FAMILY $TABLE not found"
+    $NFT delete table "$FAMILY" "${TABLE}_nat" 2>/dev/null && \
+        echo "deleted table $FAMILY ${TABLE}_nat" || \
+        echo "table $FAMILY ${TABLE}_nat not found"
+}
+
 cmd_status() {
     require_nft
-    # Show both filter and NAT tables if they exist
     $NFT list table "$FAMILY" "$TABLE" 2>/dev/null || true
     $NFT list table "$FAMILY" "${TABLE}_nat" 2>/dev/null || true
-    # If neither exists, say so
     if ! $NFT list table "$FAMILY" "$TABLE" >/dev/null 2>&1; then
-        echo "no matchstick rules loaded (table $FAMILY $TABLE not found)"
+        echo "matchstick is not active (table $FAMILY $TABLE not found)"
     fi
+}
+
+cmd_check() {
+    require_config
+    "$MATCHSTICK" check "$CONFIG"
 }
 
 cmd_diff() {
@@ -76,26 +142,6 @@ cmd_diff() {
         $NFT list table "$FAMILY" "$TABLE" 2>/dev/null || true
         $NFT list table "$FAMILY" "${TABLE}_nat" 2>/dev/null || true
     } | "$MATCHSTICK" diff "$CONFIG" -
-}
-
-cmd_check() {
-    require_config
-    "$MATCHSTICK" check "$CONFIG"
-}
-
-cmd_apply() {
-    require_root
-    require_config
-    "$MATCHSTICK" apply "$CONFIG"
-}
-
-cmd_flush() {
-    require_root
-    require_nft
-    printf 'delete table %s %s\ndelete table %s %s\n' \
-        "$FAMILY" "$TABLE" "$FAMILY" "${TABLE}_nat" \
-        | $NFT -f - 2>/dev/null || true
-    echo "flushed $FAMILY $TABLE"
 }
 
 cmd_edit() {
@@ -116,20 +162,27 @@ cmd_edit() {
     fi
 }
 
-cmd_render() {
+cmd_show() {
     require_config
-    "$MATCHSTICK" render "$CONFIG"
+    case "${1:-matrix}" in
+        matrix)     "$MATCHSTICK" show matrix "$CONFIG" ;;
+        rules)      shift; "$MATCHSTICK" show rules "$CONFIG" "$@" ;;
+        topology)   "$MATCHSTICK" show topology "$CONFIG" --format="${2:-ascii}" ;;
+        render)     "$MATCHSTICK" render "$CONFIG" ;;
+        json)       "$MATCHSTICK" show json "$CONFIG" ;;
+        sysctl)     "$MATCHSTICK" show sysctl "$CONFIG" ;;
+        *)          echo "error: unknown show subcommand: $1" >&2; usage ;;
+    esac
 }
 
 case "${1:-}" in
-    status)     cmd_status ;;
-    diff)       cmd_diff ;;
-    check)      cmd_check ;;
-    apply)      cmd_apply ;;
-    reload)     cmd_apply ;;
-    flush)      cmd_flush ;;
-    edit)       cmd_edit ;;
-    render)     cmd_render ;;
-    version)    "$MATCHSTICK" version ;;
-    *)          usage ;;
+    enable|start|apply|reload)  cmd_enable ;;
+    disable|stop)               cmd_disable ;;
+    status)                     cmd_status ;;
+    check)                      cmd_check ;;
+    diff)                       cmd_diff ;;
+    edit)                       cmd_edit ;;
+    show)                       shift; cmd_show "$@" ;;
+    version)                    "$MATCHSTICK" version ;;
+    *)                          usage ;;
 esac

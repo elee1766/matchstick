@@ -4,24 +4,26 @@ SYSCONFDIR ?= /etc
 SHAREDIR   ?= $(PREFIX)/share/matchstick
 DESTDIR    ?=
 
-NIM        ?= nim
-NIMFLAGS   ?= -d:release
-
 BIN        = matchstick
-SRC        = src/matchstick.nim
 
 .PHONY: all build install uninstall clean test
 
 all: build
 
+# Always run nimble — it handles its own incremental compilation.
+# The $(BIN) file target below is only for install's dependency check.
 build:
-	nimble build -d:release
+	nimble build -d:release -y
 
-install: build
+# install depends on the binary file existing, not on build.
+# This means `make` as user, then `sudo make install` won't rebuild as root.
+install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 	install -m 755 msctl $(DESTDIR)$(BINDIR)/msctl
 	install -d $(DESTDIR)$(SYSCONFDIR)/matchstick
+	test -f $(DESTDIR)$(SYSCONFDIR)/matchstick/firewall.lua.example || \
+		install -m 644 contrib/firewall.lua.example $(DESTDIR)$(SYSCONFDIR)/matchstick/firewall.lua.example
 	install -d $(DESTDIR)$(SHAREDIR)/examples
 	install -m 644 contrib/examples/*.lua $(DESTDIR)$(SHAREDIR)/examples/
 	install -d $(DESTDIR)$(SHAREDIR)/luals

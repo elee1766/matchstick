@@ -2,49 +2,34 @@
 
 description="matchstick nftables firewall"
 
-MATCHSTICK_CONFIG="${MATCHSTICK_CONFIG:-/etc/matchstick/firewall.lua}"
-MATCHSTICK_BIN="${MATCHSTICK_BIN:-/usr/bin/matchstick}"
-NFT_BIN="${NFT_BIN:-/usr/bin/nft}"
-TABLE_NAME="${TABLE_NAME:-matchstick}"
+MSCTL="${MSCTL:-/usr/local/bin/msctl}"
 
 depend() {
 	before net
 	use logger
 }
 
-checkconfig() {
-	if [ ! -f "$MATCHSTICK_CONFIG" ]; then
-		eerror "Config file not found: $MATCHSTICK_CONFIG"
-		return 1
-	fi
-	ebegin "Checking matchstick config"
-	"$MATCHSTICK_BIN" check "$MATCHSTICK_CONFIG" >/dev/null 2>&1
-	eend $?
-}
-
 start() {
-	checkconfig || return 1
 	ebegin "Starting matchstick firewall"
-	"$MATCHSTICK_BIN" apply "$MATCHSTICK_CONFIG"
+	"$MSCTL" enable
 	eend $?
 }
 
 stop() {
 	ebegin "Stopping matchstick firewall"
-	"$NFT_BIN" delete table inet "$TABLE_NAME" 2>/dev/null
-	"$NFT_BIN" delete table inet "${TABLE_NAME}_nat" 2>/dev/null
-	eend 0
+	"$MSCTL" disable
+	eend $?
 }
 
 reload() {
-	checkconfig || return 1
 	ebegin "Reloading matchstick firewall"
-	"$MATCHSTICK_BIN" apply "$MATCHSTICK_CONFIG"
+	"$MSCTL" enable
 	eend $?
 }
 
 status() {
-	if "$NFT_BIN" list table inet "$TABLE_NAME" >/dev/null 2>&1; then
+	"$MSCTL" status >/dev/null 2>&1
+	if [ $? -eq 0 ]; then
 		einfo "matchstick firewall is active"
 		return 0
 	else

@@ -9,9 +9,9 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
-ExecReload=/usr/bin/matchstick apply /etc/matchstick/firewall.lua
-ExecStop=/bin/sh -c 'printf "delete table inet matchstick\ndelete table inet matchstick_nat\n" | /usr/bin/nft -f -'
+ExecStart=/usr/local/bin/msctl enable
+ExecReload=/usr/local/bin/msctl enable
+ExecStop=/usr/local/bin/msctl disable
 
 # Security hardening
 ProtectHome=yes

@@ -13,9 +13,6 @@ import ./matchstickpkg/import_ufw
 
 import experimental/diff
 
-when not defined(noSystem):
-  import ./nftables_cli
-
 # ---------------------------------------------------------------------------
 # Version info (computed at compile time from git)
 # ---------------------------------------------------------------------------
@@ -52,8 +49,6 @@ proc usage() =
   stderr.writeLine "  check   [config]              Validate config"
   stderr.writeLine "  render  [config]              Emit nftables text (--json for JSON)"
   stderr.writeLine "  diff    <fileA> <fileB>       Diff two rulesets (- for stdin)"
-  when not defined(noSystem):
-    stderr.writeLine "  apply   [config]              Apply to kernel (--no-sysctl to skip)"
   stderr.writeLine "  show    <sub> [config]        Visualize config (see below)"
   stderr.writeLine "  import-ufw                    Convert UFW rules from stdin"
   stderr.writeLine "  version                       Print build info"
@@ -68,11 +63,14 @@ proc usage() =
   stderr.writeLine "Options:"
   stderr.writeLine "  --allow-hooks                 Allow fw:hook shell commands"
   stderr.writeLine "  --allow-raw-nft               Allow fw:chain/fw:raw_nft"
-  stderr.writeLine "  --json, -j                    JSON output (render, apply)"
+  stderr.writeLine "  --json, -j                    JSON output for render"
   stderr.writeLine "  --version, -v                 Print version"
   stderr.writeLine ""
   stderr.writeLine "Config is auto-detected from /etc/matchstick/firewall.lua if not specified."
   stderr.writeLine ".lua files in diff are rendered; other files and - are read as text."
+  stderr.writeLine ""
+  stderr.writeLine "To apply rules to the kernel, use msctl:"
+  stderr.writeLine "  msctl enable                  Compile, validate, and apply"
   quit(1)
 
 proc loadConfig(configFile: string): FirewallState =
@@ -123,7 +121,6 @@ type
     showSub: string       ## "matrix", "rules", "topology", "json", "sysctl"
     configFile: string
     jsonOutput: bool
-    noSysctl: bool        ## skip sysctl application
     allowHooks: bool      ## allow fw:hook shell commands
     allowRawNft: bool     ## allow fw:chain/fw:raw_nft escape hatches
     format: string        ## topology format
@@ -146,7 +143,6 @@ proc parseCli(): CliOpts =
       else:
         case key
         of "json", "j": result.jsonOutput = true
-        of "no-sysctl": result.noSysctl = true
         of "allow-hooks": result.allowHooks = true
         of "allow-raw-nft": result.allowRawNft = true
         of "format": result.format = val
@@ -280,60 +276,6 @@ proc cmdImportUfw() =
   stdout.write importUfw(input)
 
 # ---------------------------------------------------------------------------
-# Commands: system-only (require nft binary, root, /proc)
-# ---------------------------------------------------------------------------
-
-when not defined(noSystem):
-  proc cmdApply(opts: CliOpts) =
-    let state = loadConfig(opts.configFile)
-    enforceEscapeHatches(opts, state)
-    let ok = runValidation(state)
-    if not ok:
-      stderr.writeLine "error: config has validation errors, refusing to apply"
-      quit(1)
-    let ruleset = buildRuleset(state)
-    let jsonStr = emitJson(ruleset, pretty = false)
-
-    stderr.writeLine "validating..."
-    let valResult = nftValidate(jsonStr)
-    if not valResult.success:
-      stderr.writeLine "error: nftables validation failed:"
-      stderr.writeLine valResult.error
-      quit(1)
-
-    # Apply sysctl settings (before loading nftables rules)
-    if not opts.noSysctl:
-      let sysctls = deriveSysctls(state)
-      if sysctls.entries.len > 0:
-        stderr.writeLine "applying " & $sysctls.entries.len & " sysctl settings..."
-        let errors = applySysctls(sysctls)
-        for e in errors:
-          stderr.writeLine "warning: sysctl: " & e
-    else:
-      stderr.writeLine "skipping sysctl (--no-sysctl)"
-
-    if state.hooks.preStart != "":
-      stderr.writeLine "running pre_start hook..."
-      let hookResult = execShellCmd(state.hooks.preStart)
-      if hookResult != 0:
-        stderr.writeLine "warning: pre_start hook exited with code " & $hookResult
-
-    stderr.writeLine "applying..."
-    let applyResult = nftApply(jsonStr)
-    if not applyResult.success:
-      stderr.writeLine "error: nftables apply failed:"
-      stderr.writeLine applyResult.error
-      quit(1)
-
-    if state.hooks.postStart != "":
-      stderr.writeLine "running post_start hook..."
-      let hookResult = execShellCmd(state.hooks.postStart)
-      if hookResult != 0:
-        stderr.writeLine "warning: post_start hook exited with code " & $hookResult
-
-    echo "ok: rules applied"
-
-# ---------------------------------------------------------------------------
 # Commands: diff (pure computation, no nft dependency)
 # ---------------------------------------------------------------------------
 
@@ -465,11 +407,10 @@ proc main() =
     of "render":  cmdRender(opts)
     of "show":    cmdShow(opts)
     of "apply":
-      when defined(noSystem):
-        stderr.writeLine "error: 'apply' is not available in this build (compiled with -d:noSystem)"
-        quit(1)
-      else:
-        cmdApply(opts)
+      stderr.writeLine "error: 'apply' has moved to msctl"
+      stderr.writeLine "  msctl enable     apply config to kernel"
+      stderr.writeLine "  msctl disable    remove rules"
+      quit(1)
     else:
       stderr.writeLine "error: unknown command: " & opts.command
       usage()

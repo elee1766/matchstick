@@ -1,0 +1,29 @@
+-- matchstick firewall config
+--
+-- Copy this file to get started:
+--   cp /etc/matchstick/firewall.lua.example /etc/matchstick/firewall.lua
+--
+-- Or import existing UFW rules:
+--   sudo ufw show added | matchstick import-ufw > /etc/matchstick/firewall.lua
+--
+-- Then validate and apply:
+--   msctl check
+--   msctl enable
+
+-- Services
+local ssh   = fw:service("ssh",   "tcp", 22)
+local http  = fw:service("http",  "tcp", 80)
+local https = fw:service("https", { "tcp", "udp" }, 443)
+local ping  = fw:service("ping",  "icmp", "echo-request")
+
+-- Zones
+local self = fw:zone("fw")
+local wan  = fw:zone("wan", "eth0")   -- TODO: change to your interface
+
+-- Policies
+fw:policy(wan, self, "drop", { log = true })
+fw:policy(self, wan, "accept")
+
+-- Rules
+fw:rule(wan, self, "accept", ssh)
+fw:rule(wan, self, "accept", ping)
