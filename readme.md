@@ -10,6 +10,11 @@ you write lua code which gets compiled into nftables rulesets with some sysctl r
 
 similar projects: shorewall, awall, foomuuri
 
+two things i think are neat about matchstick, not that it means much
+
+1. no nim library dependencies
+2. no runtime dependencies, as in statically linked to libc, no other requirements
+
 **[Documentation](https://elee1766.github.io/matchstick/)**
 
 ## Example
